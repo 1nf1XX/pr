@@ -1,7 +1,6 @@
 import SwiftUI
 import AVFoundation
 import Speech
-import Network
 
 // MARK: - Voice Assistant
 class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
@@ -19,8 +18,6 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var micAccessDenied = false
 
     @AppStorage("deepseek_api_key") var apiKey: String = ""
-    
-    // PC Connection
     @Published var pcConnection: PCServerConnection?
     
     override init() {
@@ -69,7 +66,6 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
-        // Если нужно отправить на ПК
         if sendToPC, let pcConnection = pcConnection, pcConnection.isConnected {
             pcConnection.sendVoiceCommand(prompt)
             DispatchQueue.main.async {
@@ -226,14 +222,16 @@ class PCServerConnection: ObservableObject {
     
     func connect() {
         guard let url = URL(string: "ws://\(pcIP):\(pcPort)") else {
+            print("❌ Invalid URL")
             return
         }
+        
+        print("🔗 Connecting to: \(url)")
         
         session = URLSession(configuration: .default)
         webSocket = session?.webSocketTask(with: url)
         webSocket?.resume()
         
-        // Авторизация
         let authMessage: [String: Any] = ["auth": authToken]
         sendJSON(authMessage)
         
@@ -244,19 +242,26 @@ class PCServerConnection: ObservableObject {
     func disconnect() {
         webSocket?.cancel(with: .goingAway, reason: nil)
         isConnected = false
+        print("🔌 Disconnected")
     }
     
     private func sendJSON(_ data: [String: Any]) {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: data),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
+            print("❌ Can't serialize JSON")
             return
         }
         
+        print("📤 Sending: \(jsonString)")
+        
         webSocket?.send(.string(jsonString)) { [weak self] error in
             if let error = error {
+                print("❌ Send error: \(error)")
                 DispatchQueue.main.async {
                     self?.isConnected = false
                 }
+            } else {
+                print("✅ Message sent")
             }
         }
     }
@@ -267,11 +272,13 @@ class PCServerConnection: ObservableObject {
             case .success(let message):
                 switch message {
                 case .string(let text):
+                    print("📥 Received: \(text)")
                     DispatchQueue.main.async {
                         self?.handleResponse(text)
                     }
                 case .data(let data):
                     if let text = String(data: data, encoding: .utf8) {
+                        print("📥 Received data: \(text)")
                         DispatchQueue.main.async {
                             self?.handleResponse(text)
                         }
@@ -281,6 +288,7 @@ class PCServerConnection: ObservableObject {
                 }
                 self?.startListening()
             case .failure(let error):
+                print("❌ Receive error: \(error)")
                 DispatchQueue.main.async {
                     self?.isConnected = false
                 }
@@ -325,7 +333,6 @@ class PCServerConnection: ObservableObject {
         }
     }
     
-    // Команды для отправки на ПК
     func sendVoiceCommand(_ text: String) {
         sendJSON([
             "command": "voice_command",
@@ -390,17 +397,6 @@ class PCServerConnection: ObservableObject {
         ])
     }
     
-    func getProcessList() {
-        sendJSON(["command": "process_list"])
-    }
-    
-    func killProcess(pid: Int) {
-        sendJSON([
-            "command": "kill_process",
-            "params": ["pid": pid]
-        ])
-    }
-    
     func switchAudioDevice(_ device: String) {
         sendJSON([
             "command": "audio_device",
@@ -411,9 +407,70 @@ class PCServerConnection: ObservableObject {
 
 // MARK: - Colors Extension
 extension Color {
-    static let lupinAccent = Color(red: 0.95, green: 0.9, blue: 0.2)
-    static let lupinBackground = Color(red: 0.08, green: 0.08, blue: 0.1)
-    static let lupinPanel = Color(red: 0.12, green: 0.12, blue: 0.15)
+    static let lupinAccent = Color(red: 0.85, green: 0.88, blue: 0.0) // #D8E000
+    static let lupinAccentHover = Color(red: 0.69, green: 0.72, blue: 0.0) // #B0B800
+    static let lupinBackground = Color(red: 0.04, green: 0.04, blue: 0.04) // #0a0a0a
+    static let lupinPanel = Color(red: 0.07, green: 0.07, blue: 0.07) // #111111
+    static let lupinBorder = Color(red: 0.10, green: 0.10, blue: 0.10) // #1a1a1a
+    static let lupinText = Color(red: 0.72, green: 0.72, blue: 0.72) // #B8B8B8
+    static let lupinTextDim = Color(red: 0.40, green: 0.40, blue: 0.40) // #666666
+    static let lupinRed = Color(red: 1.0, green: 0.27, blue: 0.27) // #FF4444
+    static let lupinGreen = Color(red: 0.27, green: 1.0, blue: 0.27) // #44FF44
+    static let lupinOrange = Color(red: 1.0, green: 0.53, blue: 0.0) // #FF8800
+}
+
+// MARK: - Custom Button Style
+struct LupinButtonStyle: ButtonStyle {
+    var isActive: Bool = false
+    var isDanger: Bool = false
+    
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .bold, design: .monospaced))
+            .foregroundColor(foregroundColor)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(backgroundColor)
+            .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(borderColor, lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+    
+    private var foregroundColor: Color {
+        if isActive {
+            return .black
+        } else if isDanger {
+            return .lupinRed
+        } else {
+            return .lupinText
+        }
+    }
+    
+    private var backgroundColor: Color {
+        if configuration.isPressed {
+            return .lupinAccentHover
+        } else if isActive {
+            return .lupinAccent
+        } else if isDanger {
+            return Color(red: 0.10, green: 0.05, blue: 0.05)
+        } else {
+            return .lupinPanel
+        }
+    }
+    
+    private var borderColor: Color {
+        if isActive {
+            return .lupinAccent
+        } else if isDanger {
+            return Color(red: 0.24, green: 0.11, blue: 0.11)
+        } else {
+            return .lupinBorder
+        }
+    }
 }
 
 // MARK: - Pixel Character
@@ -456,10 +513,10 @@ struct PixelLupinView: View {
 
     private func pixelColor(for value: Int) -> Color {
         switch value {
-        case 1: return Color(red: 0.16, green: 0.16, blue: 0.19)
+        case 1: return Color(red: 0.10, green: 0.10, blue: 0.10)
         case 2: return Color(red: 0.86, green: 0.72, blue: 0.55)
-        case 3: return Color(red: 0.14, green: 0.14, blue: 0.18)
-        case 4: return Color(red: 0.09, green: 0.09, blue: 0.12)
+        case 3: return Color(red: 0.10, green: 0.10, blue: 0.12)
+        case 4: return Color(red: 0.06, green: 0.06, blue: 0.08)
         case 5: return Color.lupinAccent
         case 7: return Color.black.opacity(0.85)
         case 8: return Color.lupinAccent
@@ -511,6 +568,35 @@ struct PixelLupinView: View {
     }
 }
 
+// MARK: - Section View
+struct SectionView<Content: View>: View {
+    let title: String
+    let content: Content
+    
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(.lupinAccent)
+                .padding(.bottom, 2)
+            
+            content
+        }
+        .padding(12)
+        .background(Color.lupinPanel)
+        .cornerRadius(4)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.lupinBorder, lineWidth: 1)
+        )
+    }
+}
+
 // MARK: - Main Content View
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
@@ -525,7 +611,8 @@ struct ContentView: View {
             Color.lupinBackground
                 .ignoresSafeArea()
 
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
+                // Header
                 HStack {
                     Spacer()
                     Text("LUPIN // SUITE")
@@ -539,52 +626,69 @@ struct ContentView: View {
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape.fill")
                                 .font(.system(size: 18))
-                                .foregroundColor(.gray)
+                                .foregroundColor(.lupinTextDim)
                         }
                         .padding(.trailing)
                     }
                 )
                 .padding(.top, 10)
 
+                // Pixel Character
                 PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
                     .padding(.top, 4)
 
-                // PC Connection Status
-                HStack {
+                // PC Connection + Text Input Toggle
+                HStack(spacing: 12) {
                     Button(action: { showPCControls.toggle() }) {
                         HStack {
-                            Image(systemName: "desktopcomputer")
-                                .font(.system(size: 14))
+                            Circle()
+                                .fill(pcConnection.isConnected ? Color.lupinGreen : Color.lupinRed)
+                                .frame(width: 8, height: 8)
                             Text(pcConnection.isConnected ? "PC ONLINE" : "PC OFFLINE")
-                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .foregroundColor(pcConnection.isConnected ? .lupinGreen : .lupinRed)
                         }
-                        .foregroundColor(pcConnection.isConnected ? .green : .gray)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(Color.lupinPanel)
-                        .cornerRadius(8)
+                        .cornerRadius(4)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.lupinBorder, lineWidth: 1)
+                        )
                     }
                     
                     Spacer()
                     
-                    // Text Input Toggle
                     Button(action: { showTextInput.toggle() }) {
-                        Image(systemName: "keyboard")
+                        Image(systemName: showTextInput ? "keyboard.chevron.compact.down" : "keyboard")
                             .font(.system(size: 16))
                             .foregroundColor(.lupinAccent)
                             .padding(8)
                             .background(Color.lupinPanel)
-                            .cornerRadius(8)
+                            .cornerRadius(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.lupinBorder, lineWidth: 1)
+                            )
                     }
                 }
                 .padding(.horizontal)
 
                 // Text Input Field
                 if showTextInput {
-                    HStack {
+                    HStack(spacing: 8) {
                         TextField("Введите команду...", text: $textInput)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .textFieldStyle(PlainTextFieldStyle())
                             .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(.white)
+                            .padding(10)
+                            .background(Color.lupinPanel)
+                            .cornerRadius(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.lupinBorder, lineWidth: 1)
+                            )
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                             .submitLabel(.send)
@@ -594,48 +698,46 @@ struct ContentView: View {
                         
                         Button(action: sendTextCommand) {
                             Image(systemName: "paperplane.fill")
-                                .foregroundColor(.lupinAccent)
+                                .foregroundColor(.black)
+                                .padding(10)
+                                .background(Color.lupinAccent)
+                                .cornerRadius(4)
                         }
                     }
                     .padding(.horizontal)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("ВХОДЯЩИЙ ПОТОК:")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundColor(.gray)
+                // Input Stream
+                SectionView(title: "ВХОДЯЩИЙ ПОТОК:") {
                     Text(assistant.recognizedText)
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding()
-                .background(Color.lupinPanel)
-                .cornerRadius(10)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.lupinAccent.opacity(0.3), lineWidth: 1)
-                )
                 .padding(.horizontal)
 
+                // Microphone Access Denied
                 if assistant.micAccessDenied {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.red)
+                            .foregroundColor(.lupinRed)
                         Text("Микрофон заблокирован. Разреши доступ в Настройках iOS.")
                             .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.red)
+                            .foregroundColor(.lupinRed)
                     }
                     .padding(.horizontal)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("ОТВЕТ ЯДРА:")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundColor(.gray)
+                // Response
+                SectionView(title: "ОТВЕТ ЯДРА:") {
                     if assistant.isProcessing {
-                        ProgressView()
-                            .tint(.lupinAccent)
+                        HStack {
+                            ProgressView()
+                                .tint(.lupinAccent)
+                            Text("ОБРАБОТКА...")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.lupinOrange)
+                        }
                     } else {
                         ScrollView {
                             Text(assistant.assistantReply)
@@ -646,13 +748,6 @@ struct ContentView: View {
                         .frame(maxHeight: 150)
                     }
                 }
-                .padding()
-                .background(Color.lupinPanel)
-                .cornerRadius(10)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.lupinAccent, lineWidth: 1)
-                )
                 .padding(.horizontal)
 
                 Spacer()
@@ -661,7 +756,6 @@ struct ContentView: View {
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
-                        // Send to PC if connected, otherwise to DeepSeek
                         if pcConnection.isConnected {
                             assistant.sendToDeepSeek(prompt: assistant.recognizedText, sendToPC: true)
                         } else {
@@ -675,14 +769,14 @@ struct ContentView: View {
                         .font(.system(size: 35))
                         .foregroundColor(.black)
                         .padding(25)
-                        .background(assistant.isListening ? Color.red : Color.lupinAccent)
+                        .background(assistant.isListening ? Color.lupinRed : Color.lupinAccent)
                         .clipShape(Circle())
-                        .shadow(color: (assistant.isListening ? Color.red : Color.lupinAccent).opacity(0.5), radius: 10)
+                        .shadow(color: (assistant.isListening ? Color.lupinRed : Color.lupinAccent).opacity(0.5), radius: 10)
                 }
 
                 Text(assistant.isListening ? "ИДЕТ ЗАПИСЬ..." : "НАЖМИ ДЛЯ ВВОДА")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .foregroundColor(.gray)
+                    .foregroundColor(.lupinTextDim)
                     .padding(.bottom, 20)
             }
         }
@@ -706,7 +800,9 @@ struct ContentView: View {
         let command = textInput
         textInput = ""
         
-        // Send to PC if connected, otherwise to DeepSeek
+        print("📱 Sending command: \(command)")
+        print("📱 PC Connected: \(pcConnection.isConnected)")
+        
         if pcConnection.isConnected {
             pcConnection.sendTextMessage(command)
             assistant.assistantReply = "Отправлено на ПК: \(command)"
@@ -722,7 +818,6 @@ struct PCControlView: View {
     @Environment(\.dismiss) var dismiss
     @State private var volume: Double = 50
     @State private var musicQuery = ""
-    @State private var showScreenshot = false
     
     var body: some View {
         NavigationView {
@@ -730,25 +825,48 @@ struct PCControlView: View {
                 Color.lupinBackground.ignoresSafeArea()
                 
                 ScrollView {
-                    VStack(spacing: 15) {
-                        // Connection Settings
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("CONNECTION")
-                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                .foregroundColor(.gray)
-                            
+                    VStack(spacing: 12) {
+                        // Connection
+                        SectionView(title: "CONNECTION") {
                             VStack(spacing: 8) {
                                 TextField("PC IP Address", text: $pcConnection.pcIP)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(Color.lupinBackground)
+                                    .cornerRadius(4)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(Color.lupinBorder, lineWidth: 1)
+                                    )
                                     .autocapitalization(.none)
                                     .disableAutocorrection(true)
                                 
                                 TextField("Port", text: $pcConnection.pcPort)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(Color.lupinBackground)
+                                    .cornerRadius(4)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(Color.lupinBorder, lineWidth: 1)
+                                    )
                                     .keyboardType(.numberPad)
                                 
                                 SecureField("Auth Token", text: $pcConnection.authToken)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(Color.lupinBackground)
+                                    .cornerRadius(4)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(Color.lupinBorder, lineWidth: 1)
+                                    )
                                     .autocapitalization(.none)
                                 
                                 Button(action: {
@@ -759,129 +877,116 @@ struct PCControlView: View {
                                     }
                                 }) {
                                     Text(pcConnection.isConnected ? "DISCONNECT" : "CONNECT")
-                                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                        .font(.system(size: 13, weight: .bold, design: .monospaced))
                                         .foregroundColor(.black)
                                         .frame(maxWidth: .infinity)
-                                        .padding()
-                                        .background(pcConnection.isConnected ? Color.red : Color.green)
-                                        .cornerRadius(8)
+                                        .padding(10)
+                                        .background(pcConnection.isConnected ? Color.lupinRed : Color.lupinGreen)
+                                        .cornerRadius(4)
                                 }
                             }
                         }
-                        .padding()
-                        .background(Color.lupinPanel)
-                        .cornerRadius(10)
                         
-                        // System Info
                         if pcConnection.isConnected {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("SYSTEM INFO")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
+                            // System Info
+                            SectionView(title: "SYSTEM INFO") {
                                 Text(pcConnection.systemInfo)
                                     .font(.system(size: 12, design: .monospaced))
                                     .foregroundColor(.white)
                                     .lineLimit(nil)
                                 
-                                Button("Refresh Info") {
+                                Button("REFRESH INFO") {
                                     pcConnection.requestSystemInfo()
                                 }
-                                .foregroundColor(.lupinAccent)
+                                .buttonStyle(LupinButtonStyle(isActive: true))
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                             
                             // Media Control
-                            VStack(spacing: 10) {
-                                Text("MEDIA CONTROL")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
-                                HStack(spacing: 30) {
+                            SectionView(title: "MEDIA CONTROL") {
+                                HStack(spacing: 20) {
                                     Button(action: { pcConnection.controlMedia("prev") }) {
                                         Image(systemName: "backward.fill")
-                                            .font(.system(size: 25))
+                                            .font(.system(size: 22))
                                             .foregroundColor(.lupinAccent)
+                                            .frame(maxWidth: .infinity)
+                                            .padding(10)
+                                            .background(Color.lupinBackground)
+                                            .cornerRadius(4)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 4)
+                                                    .stroke(Color.lupinBorder, lineWidth: 1)
+                                            )
                                     }
                                     
                                     Button(action: { pcConnection.controlMedia("toggle") }) {
                                         Image(systemName: "playpause.fill")
-                                            .font(.system(size: 25))
-                                            .foregroundColor(.lupinAccent)
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.black)
+                                            .frame(maxWidth: .infinity)
+                                            .padding(10)
+                                            .background(Color.lupinAccent)
+                                            .cornerRadius(4)
                                     }
                                     
                                     Button(action: { pcConnection.controlMedia("next") }) {
                                         Image(systemName: "forward.fill")
-                                            .font(.system(size: 25))
+                                            .font(.system(size: 22))
                                             .foregroundColor(.lupinAccent)
+                                            .frame(maxWidth: .infinity)
+                                            .padding(10)
+                                            .background(Color.lupinBackground)
+                                            .cornerRadius(4)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 4)
+                                                    .stroke(Color.lupinBorder, lineWidth: 1)
+                                            )
                                     }
                                 }
                                 
-                                // Music Search
-                                HStack {
+                                HStack(spacing: 8) {
                                     TextField("Поиск музыки...", text: $musicQuery)
-                                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                                        .font(.system(size: 14, design: .monospaced))
+                                        .textFieldStyle(PlainTextFieldStyle())
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundColor(.white)
+                                        .padding(8)
+                                        .background(Color.lupinBackground)
+                                        .cornerRadius(4)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 4)
+                                                .stroke(Color.lupinBorder, lineWidth: 1)
+                                        )
                                     
-                                    Button("Search") {
+                                    Button("SEARCH") {
                                         if !musicQuery.isEmpty {
                                             pcConnection.searchMusic(musicQuery)
                                         }
                                     }
-                                    .foregroundColor(.lupinAccent)
+                                    .buttonStyle(LupinButtonStyle(isActive: true))
                                 }
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                             
                             // Tor Control
-                            VStack(spacing: 10) {
-                                Text("TOR CONTROL")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
-                                HStack(spacing: 10) {
-                                    Button("Connect") {
+                            SectionView(title: "TOR CONTROL") {
+                                HStack(spacing: 8) {
+                                    Button("CONNECT") {
                                         pcConnection.controlTor("connect")
                                     }
-                                    .foregroundColor(.green)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle(isActive: true))
                                     
-                                    Button("Disconnect") {
+                                    Button("DISCONNECT") {
                                         pcConnection.controlTor("disconnect")
                                     }
-                                    .foregroundColor(.red)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
                                     
-                                    Button("New Identity") {
+                                    Button("NEW ID") {
                                         pcConnection.controlTor("new_identity")
                                     }
-                                    .foregroundColor(.lupinAccent)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                 }
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                             
-                            // Volume Control
-                            VStack(spacing: 10) {
-                                Text("VOLUME: \(Int(volume))%")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
+                            // Volume
+                            SectionView(title: "VOLUME: \(Int(volume))%") {
                                 Slider(value: $volume, in: 0...100) { editing in
                                     if !editing {
                                         pcConnection.controlVolume(Int(volume))
@@ -889,131 +994,72 @@ struct PCControlView: View {
                                 }
                                 .tint(.lupinAccent)
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                             
                             // Screenshot
-                            VStack(spacing: 10) {
-                                Text("SCREENSHOT")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
-                                Button("Take Screenshot") {
+                            SectionView(title: "SCREENSHOT") {
+                                Button("TAKE SCREENSHOT") {
                                     pcConnection.takeScreenshot()
                                 }
-                                .foregroundColor(.lupinAccent)
-                                .padding()
-                                .background(Color.lupinPanel)
-                                .cornerRadius(8)
+                                .buttonStyle(LupinButtonStyle(isActive: true))
                                 
                                 if let screenshot = pcConnection.screenshot {
                                     Image(uiImage: screenshot)
                                         .resizable()
                                         .scaledToFit()
                                         .frame(maxHeight: 200)
-                                        .cornerRadius(8)
+                                        .cornerRadius(4)
                                 }
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                             
-                            // Quick Launch Apps
-                            VStack(spacing: 10) {
-                                Text("QUICK LAUNCH")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
-                                HStack(spacing: 10) {
-                                    Button("Chrome") {
+                            // Quick Launch
+                            SectionView(title: "QUICK LAUNCH") {
+                                HStack(spacing: 8) {
+                                    Button("CHROME") {
                                         pcConnection.launchApp("chrome")
                                     }
-                                    .foregroundColor(.blue)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                     
-                                    Button("Notepad") {
+                                    Button("NOTEPAD") {
                                         pcConnection.launchApp("notepad")
                                     }
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                     
-                                    Button("Explorer") {
+                                    Button("EXPLORER") {
                                         pcConnection.launchApp("explorer")
                                     }
-                                    .foregroundColor(.yellow)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                     
                                     Button("CMD") {
                                         pcConnection.launchApp("cmd")
                                     }
-                                    .foregroundColor(.green)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                 }
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                             
                             // Power Control
-                            VStack(spacing: 10) {
-                                Text("POWER CONTROL")
-                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.gray)
-                                
-                                HStack(spacing: 10) {
-                                    Button("Lock") {
+                            SectionView(title: "POWER CONTROL") {
+                                HStack(spacing: 8) {
+                                    Button("LOCK") {
                                         pcConnection.powerControl("lock")
                                     }
-                                    .foregroundColor(.yellow)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                     
-                                    Button("Sleep") {
+                                    Button("SLEEP") {
                                         pcConnection.powerControl("sleep")
                                     }
-                                    .foregroundColor(.blue)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle())
                                     
-                                    Button("Reboot") {
+                                    Button("REBOOT") {
                                         pcConnection.powerControl("reboot")
                                     }
-                                    .foregroundColor(.orange)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
                                     
-                                    Button("Shutdown") {
+                                    Button("SHUTDOWN") {
                                         pcConnection.powerControl("shutdown")
                                     }
-                                    .foregroundColor(.red)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(5)
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
                                 }
                             }
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .cornerRadius(10)
                         }
                     }
                     .padding()
@@ -1023,7 +1069,8 @@ struct PCControlView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Close") { dismiss() }
+                    Button("CLOSE") { dismiss() }
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
                         .foregroundColor(.lupinAccent)
                 }
             }
@@ -1049,91 +1096,84 @@ struct SettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        Text("DEEPSEEK API KEY")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .foregroundColor(.gray)
-
-                        SecureField("sk-...", text: $draftKey)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .font(.system(size: 14, design: .monospaced))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                            )
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-
-                        Text("Ключ хранится только на этом устройстве (AppStorage) и вводится один раз.")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.gray)
-
-                        Divider()
-                            .background(Color.gray.opacity(0.3))
-
-                        Text("PC CONNECTION")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .foregroundColor(.gray)
-
-                        TextField("PC IP Address", text: $draftIP)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .font(.system(size: 14, design: .monospaced))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                            )
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-
-                        TextField("Port", text: $draftPort)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .font(.system(size: 14, design: .monospaced))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                            )
-                            .keyboardType(.numberPad)
-
-                        SecureField("Auth Token", text: $draftToken)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding()
-                            .background(Color.lupinPanel)
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .font(.system(size: 14, design: .monospaced))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                            )
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-
-                        Text("Для подключения к ПК убедитесь, что:")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.gray)
-                        Text("• LUPIN SUITE запущен на ПК")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.gray)
-                        Text("• Оба устройства в одной Wi-Fi сети")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.gray)
-                        Text("• Порт 8080 не заблокирован")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.gray)
-
-                        Spacer()
-
+                        SectionView(title: "DEEPSEEK API KEY") {
+                            SecureField("sk-...", text: $draftKey)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Color.lupinBackground)
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.lupinBorder, lineWidth: 1)
+                                )
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                            
+                            Text("Ключ хранится только на этом устройстве (AppStorage) и вводится один раз.")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.lupinTextDim)
+                        }
+                        
+                        SectionView(title: "PC CONNECTION") {
+                            TextField("PC IP Address", text: $draftIP)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Color.lupinBackground)
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.lupinBorder, lineWidth: 1)
+                                )
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                            
+                            TextField("Port", text: $draftPort)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Color.lupinBackground)
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.lupinBorder, lineWidth: 1)
+                                )
+                                .keyboardType(.numberPad)
+                            
+                            SecureField("Auth Token", text: $draftToken)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Color.lupinBackground)
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.lupinBorder, lineWidth: 1)
+                                )
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Для подключения к ПК убедитесь, что:")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.lupinTextDim)
+                                Text("• LUPIN SUITE запущен на ПК")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.lupinTextDim)
+                                Text("• Оба устройства в одной Wi-Fi сети")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.lupinTextDim)
+                                Text("• Порт 8080 не заблокирован")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.lupinTextDim)
+                            }
+                        }
+                        
                         Button(action: {
                             apiKey = draftKey
                             pcConnection.pcIP = draftIP
@@ -1147,18 +1187,19 @@ struct SettingsView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding()
                                 .background(Color.lupinAccent)
-                                .cornerRadius(8)
+                                .cornerRadius(4)
                         }
                         .disabled(draftKey.isEmpty && draftIP.isEmpty)
                     }
                     .padding()
                 }
             }
-            .navigationTitle("Настройки")
+            .navigationTitle("НАСТРОЙКИ")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Закрыть") { dismiss() }
+                    Button("ЗАКРЫТЬ") { dismiss() }
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
                         .foregroundColor(.lupinAccent)
                 }
             }
