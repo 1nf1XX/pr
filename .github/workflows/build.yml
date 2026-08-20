@@ -10,15 +10,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen & ImageMagick
+        run: brew install xcodegen imagemagick
 
-      - name: Prepare Sources & Generate Xcode Project
+      - name: Prepare Assets & Icon
         run: |
           mkdir -p Sources
           mv *.swift Sources/ContentView.swift || true
 
-          # Автоматически добавляем точку входа @main, если её нет в файле
           if ! grep -q "@main" Sources/ContentView.swift; then
             cat << 'EOF' >> Sources/ContentView.swift
 
@@ -35,6 +34,29 @@ jobs:
           EOF
           fi
 
+          # Настройка иконки приложения
+          if [ -f "icon.png" ]; then
+            mkdir -p Assets.xcassets/AppIcon.appiconset
+            magick icon.png -resize 1024x1024 Assets.xcassets/AppIcon.appiconset/icon_1024.png
+            
+            cat << 'EOF' > Assets.xcassets/AppIcon.appiconset/Contents.json
+            {
+              "images": [
+                {
+                  "filename": "icon_1024.png",
+                  "idiom": "universal",
+                  "platform": "ios",
+                  "size": "1024x1024"
+                }
+              ],
+              "info": {
+                "author": "xcode",
+                "version": 1
+              }
+            }
+            EOF
+          fi
+
           cat << 'EOF' > project.yml
           name: LupinApp
           options:
@@ -47,13 +69,26 @@ jobs:
             LupinApp:
               type: application
               platform: iOS
-              sources: [Sources]
+              sources: 
+                - Sources
+                - Assets.xcassets
+              info:
+                path: Info.plist
+                properties:
+                  CFBundleIdentifier: com.lupin.app
+                  CFBundleName: LupinApp
+                  CFBundleExecutable: LupinApp
+                  CFBundlePackageType: APPL
+                  CFBundleShortVersionString: "1.0"
+                  CFBundleVersion: "1"
+                  UILaunchScreen: {}
               settings:
                 PRODUCT_BUNDLE_IDENTIFIER: com.lupin.app
                 CODE_SIGNING_ALLOWED: NO
                 CODE_SIGNING_REQUIRED: NO
                 DEVELOPMENT_TEAM: ""
                 PROVISIONING_PROFILE_SPECIFIER: ""
+                ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
           EOF
 
           xcodegen generate --spec project.yml
