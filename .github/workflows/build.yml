@@ -22,9 +22,10 @@ jobs:
           name: LupinApp
           options:
             bundleIdPrefix: com.lupin
-            xcodeVersion: "15.0"
             deploymentTarget:
               iOS: "16.0"
+            xcodeVersion: "15.4"
+            generateEmptyDirectories: true
           targets:
             LupinApp:
               type: application
@@ -38,7 +39,11 @@ jobs:
                 PROVISIONING_PROFILE_SPECIFIER: ""
           EOF
 
-          xcodegen generate
+          # Принудительно генерируем проект совместимого формата
+          xcodegen generate --spec project.yml
+
+          # Исправляем версию формата прямо в файле проекта
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' LupinApp.xcodeproj/project.pbxproj || true
 
       - name: Build App with Xcodebuild
         run: |
@@ -49,8 +54,7 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_ACTUALLY_ENABLED=NO
+            CODE_SIGN_IDENTITY=""
 
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/LupinApp.app Payload/
