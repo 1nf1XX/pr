@@ -10,30 +10,45 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '15.4'
+      - name: Install XcodeGen
+        run: brew install xcodegen
 
-      - name: Setup Package File
+      - name: Prepare Sources & Generate Xcode Project
         run: |
-          cat << 'EOF' > Package.swift
-          // swift-tools-version:5.9
-          import PackageDescription
+          mkdir -p Sources
+          mv *.swift Sources/ContentView.swift || true
 
-          let package = Package(
-              name: "LupinApp",
-              platforms: [.iOS(.v16)],
-              products: [.library(name: "LupinApp", targets: ["LupinApp"])],
-              targets: [.target(name: "LupinApp", path: ".")]
-          )
+          cat << 'EOF' > project.yml
+          name: LupinApp
+          options:
+            bundleIdPrefix: com.lupin
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            LupinApp:
+              type: application
+              platform: iOS
+              sources: [Sources]
+              settings:
+                PRODUCT_BUNDLE_IDENTIFIER: com.lupin.app
+                CODE_SIGNING_ALLOWED: NO
+                CODE_SIGNING_REQUIRED: NO
           EOF
 
-      - name: Compile App
+          xcodegen generate
+
+      - name: Build App with Xcodebuild
         run: |
-          swift build -c release --triple arm64-apple-ios16.0
-          mkdir -p Payload/LupinApp.app
-          cp -r .build/arm64-apple-ios16.0/release/LupinApp Payload/LupinApp.app/ 2>/dev/null || true
+          xcodebuild -project LupinApp.xcodeproj \
+            -scheme LupinApp \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/LupinApp.app Payload/
           zip -r LupinApp.ipa Payload
 
       - name: Upload IPA Artifact
