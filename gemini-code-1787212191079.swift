@@ -225,7 +225,7 @@ class PCServerConnection: ObservableObject {
         
         // Если это ngrok URL
         if pcIP.contains("ngrok") {
-            urlString = "wss://\(pcIP)"
+            urlString = "ws://\(pcIP):\(pcPort)"
             print("🔗 Ngrok URL: \(urlString)")
         } else {
             urlString = "ws://\(pcIP):\(pcPort)"
