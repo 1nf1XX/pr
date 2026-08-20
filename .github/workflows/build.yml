@@ -15,30 +15,28 @@ jobs:
         with:
           xcode-version: '15.4'
 
-      - name: Create Swift Package Structure
+      - name: Create Xcode Project & Build
         run: |
-          mkdir -p LupinApp/Sources
-          # Вот тут исправили: теперь скрипт переименовывает твой код строго в main.swift
-          mv *.swift LupinApp/Sources/main.swift
+          mkdir -p LupinApp
+          mv *.swift LupinApp/main.swift
           
-          cat << 'EOF' > LupinApp/Package.swift
-          // swift-tools-version:5.9
-          import PackageDescription
-
-          let package = Package(
-              name: "LupinApp",
-              platforms: [.iOS(.v16)],
-              products: [.executable(name: "LupinApp", targets: ["LupinApp"])],
-              targets: [.executableTarget(name: "LupinApp", path: "Sources")]
-          )
-          EOF
-
-      - name: Build App Payload
-        run: |
+          # Создаем проект через swift package
           cd LupinApp
-          swift build -c release --triple arm64-apple-ios16.0
-          mkdir -p Payload/LupinApp.app
-          cp .build/arm64-apple-ios16.0/release/LupinApp Payload/LupinApp.app/
+          swift package init --type executable
+          rm -rf Sources/LupinApp/main.swift
+          mv main.swift Sources/LupinApp/main.swift
+          
+          # Сборка через нативный xcodebuild под iOS
+          xcodebuild -scheme LupinApp \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -archivePath build/LupinApp.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+          # Упаковка в .ipa
+          mkdir -p Payload
+          cp -r build/LupinApp.xcarchive/Products/usr/local/bin/LupinApp Payload/ 2>/dev/null || cp -r build/LupinApp.xcarchive/Products/Applications/*.app Payload/ 2>/dev/null || true
           zip -r ../LupinApp.ipa Payload
 
       - name: Upload IPA Artifact
