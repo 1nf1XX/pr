@@ -18,8 +18,8 @@ jobs:
       - name: Create Swift Package Structure
         run: |
           mkdir -p LupinApp/Sources
-          # Автоматически находит любой .swift файл в корне и переносит его
-          mv *.swift LupinApp/Sources/ContentView.swift
+          # Вот тут исправили: теперь скрипт переименовывает твой код строго в main.swift
+          mv *.swift LupinApp/Sources/main.swift
           
           cat << 'EOF' > LupinApp/Package.swift
           // swift-tools-version:5.9
@@ -29,7 +29,7 @@ jobs:
               name: "LupinApp",
               platforms: [.iOS(.v16)],
               products: [.executable(name: "LupinApp", targets: ["LupinApp"])],
-              targets: [.target(name: "LupinApp", path: "Sources")]
+              targets: [.executableTarget(name: "LupinApp", path: "Sources")]
           )
           EOF
 
