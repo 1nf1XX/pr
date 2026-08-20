@@ -33,10 +33,10 @@ jobs:
           EOF
           fi
 
-          # Конвертируем иконку, если она загружена в репозиторий
+          # Конвертируем иконку: жестко делаем идеальный квадрат 1024x1024
           if [ -f "icon.png" ]; then
             mkdir -p Assets.xcassets/AppIcon.appiconset
-            magick icon.png -resize 1024x1024 Assets.xcassets/AppIcon.appiconset/icon_1024.png
+            magick icon.png -resize "1024x1024^" -gravity center -extent 1024x1024 Assets.xcassets/AppIcon.appiconset/icon_1024.png
             
             cat << 'EOF' > Assets.xcassets/AppIcon.appiconset/Contents.json
           {
