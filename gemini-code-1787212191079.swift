@@ -34,7 +34,21 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return AVSpeechSynthesisVoice(language: "ru-RU")
     }
 
+    // После записи речи сессия остаётся в режиме .record (только вход).
+    // TTS не может выдать звук, пока сессия не переключена на воспроизведение —
+    // это и была причина полной тишины.
+    private func configurePlaybackSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("Не удалось настроить сессию воспроизведения: \(error)")
+        }
+    }
+
     func speak(_ text: String) {
+        configurePlaybackSession()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = pickVoice()
         utterance.rate = 0.46
