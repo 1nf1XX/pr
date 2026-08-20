@@ -13,7 +13,8 @@ class VoiceAssistant: ObservableObject {
     @Published var assistantReply = "Система готова. Ожидание команды..."
     @Published var isListening = false
     @Published var isProcessing = false
-    
+    @Published var micAccessDenied = false
+
     @AppStorage("deepseek_api_key") var apiKey: String = ""
 
     func speak(_ text: String) {
@@ -26,7 +27,7 @@ class VoiceAssistant: ObservableObject {
     func sendToDeepSeek(prompt: String) {
         guard !apiKey.isEmpty else {
             DispatchQueue.main.async {
-                self.assistantReply = "Ошибка: не введен API-ключ!"
+                self.assistantReply = "Ошибка: не введен API-ключ! Открой настройки."
                 self.speak(self.assistantReply)
             }
             return
@@ -54,6 +55,13 @@ class VoiceAssistant: ObservableObject {
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async { self.isProcessing = false }
 
+            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                DispatchQueue.main.async {
+                    self.assistantReply = "Ошибка сервера: код \(httpResponse.statusCode). Проверь ключ или лимиты."
+                }
+                return
+            }
+
             guard let data = data, error == nil else {
                 DispatchQueue.main.async {
                     self.assistantReply = "Сетевая ошибка соединения с ядром."
@@ -65,7 +73,7 @@ class VoiceAssistant: ObservableObject {
                let choices = json["choices"] as? [[String: Any]],
                let message = choices.first?["message"] as? [String: Any],
                let content = message["content"] as? String {
-                
+
                 DispatchQueue.main.async {
                     self.assistantReply = content
                     self.speak(content)
@@ -82,8 +90,10 @@ class VoiceAssistant: ObservableObject {
         SFSpeechRecognizer.requestAuthorization { authStatus in
             DispatchQueue.main.async {
                 if authStatus == .authorized {
+                    self.micAccessDenied = false
                     self.startRecording()
                 } else {
+                    self.micAccessDenied = true
                     self.recognizedText = "Доступ к микрофону заблокирован системой."
                 }
             }
@@ -140,21 +150,43 @@ class VoiceAssistant: ObservableObject {
     }
 }
 
+// Акцентный цвет вынесен один раз, чтобы не повторять RGB по всему файлу
+extension Color {
+    static let adolfikAccent = Color(red: 0.95, green: 0.9, blue: 0.2)
+    static let adolfikBackground = Color(red: 0.08, green: 0.08, blue: 0.1)
+    static let adolfikPanel = Color(red: 0.12, green: 0.12, blue: 0.15)
+}
+
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
+    @State private var showSettings = false
 
     var body: some View {
         ZStack {
-            // Глубокий темный фон в стиле Lupin Suite
-            Color(red: 0.08, green: 0.08, blue: 0.1)
+            Color.adolfikBackground
                 .ignoresSafeArea()
 
             VStack(spacing: 25) {
-                // Заголовок
-                Text("ADOLFIK // SUITE")
-                    .font(.system(size: 22, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(red: 0.95, green: 0.9, blue: 0.2)) // Кислотный желтый
-                    .padding(.top, 10)
+                // Заголовок + шестеренка настроек
+                HStack {
+                    Spacer()
+                    Text("ADOLFIK // SUITE")
+                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .foregroundColor(.adolfikAccent)
+                    Spacer()
+                }
+                .overlay(
+                    HStack {
+                        Spacer()
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.trailing)
+                    }
+                )
+                .padding(.top, 10)
 
                 // Блок ввода запроса
                 VStack(alignment: .leading, spacing: 6) {
@@ -167,13 +199,25 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding()
-                .background(Color(red: 0.12, green: 0.12, blue: 0.15))
+                .background(Color.adolfikPanel)
                 .cornerRadius(10)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(red: 0.95, green: 0.9, blue: 0.2).opacity(0.3), lineWidth: 1)
+                        .stroke(Color.adolfikAccent.opacity(0.3), lineWidth: 1)
                 )
                 .padding(.horizontal)
+
+                // Предупреждение о микрофоне, если доступ запрещен
+                if assistant.micAccessDenied {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text("Микрофон заблокирован. Разреши доступ в Настройках iOS.")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.red)
+                    }
+                    .padding(.horizontal)
+                }
 
                 // Блок ответа ИИ
                 VStack(alignment: .leading, spacing: 6) {
@@ -182,20 +226,20 @@ struct ContentView: View {
                         .foregroundColor(.gray)
                     if assistant.isProcessing {
                         ProgressView()
-                            tint(Color(red: 0.95, green: 0.9, blue: 0.2))
+                            .tint(.adolfikAccent)
                     } else {
                         Text(assistant.assistantReply)
                             .font(.system(size: 15, design: .monospaced))
-                            .foregroundColor(Color(red: 0.95, green: 0.9, blue: 0.2))
+                            .foregroundColor(.adolfikAccent)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .padding()
-                .background(Color(red: 0.12, green: 0.12, blue: 0.15))
+                .background(Color.adolfikPanel)
                 .cornerRadius(10)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(red: 0.95, green: 0.9, blue: 0.2), lineWidth: 1)
+                        .stroke(Color.adolfikAccent, lineWidth: 1)
                 )
                 .padding(.horizontal)
 
@@ -214,30 +258,92 @@ struct ContentView: View {
                         .font(.system(size: 35))
                         .foregroundColor(.black)
                         .padding(25)
-                        .background(assistant.isListening ? Color.red : Color(red: 0.95, green: 0.9, blue: 0.2))
+                        .background(assistant.isListening ? Color.red : Color.adolfikAccent)
                         .clipShape(Circle())
-                        .shadow(color: (assistant.isListening ? Color.red : Color(red: 0.95, green: 0.9, blue: 0.2)).opacity(0.5), radius: 10)
+                        .shadow(color: (assistant.isListening ? Color.red : Color.adolfikAccent).opacity(0.5), radius: 10)
                 }
-                
+
                 Text(assistant.isListening ? "ИДЕТ ЗАПИСЬ..." : "НАЖМИ ДЛЯ ВВОДА")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundColor(.gray)
-
-                // Поле для API-ключа
-                SecureField("DeepSeek API Key", text: $assistant.apiKey)
-                    .textFieldStyle(PlainTextFieldStyle())
-                    .padding()
-                    .background(Color(red: 0.12, green: 0.12, blue: 0.15))
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
-                    .font(.system(size: 14, design: .monospaced))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                    )
-                    .padding(.horizontal)
                     .padding(.bottom, 20)
             }
         }
+        // Ключ вводится один раз через настройки — пустой ключ сам открывает лист
+        .sheet(isPresented: $showSettings) {
+            SettingsView(apiKey: $assistant.apiKey)
+        }
+        .onAppear {
+            if assistant.apiKey.isEmpty {
+                showSettings = true
+            }
+        }
+    }
+}
+
+struct SettingsView: View {
+    @Binding var apiKey: String
+    @Environment(\.dismiss) var dismiss
+    @State private var draftKey: String = ""
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.adolfikBackground.ignoresSafeArea()
+
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("DEEPSEEK API KEY")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundColor(.gray)
+
+                    SecureField("sk-...", text: $draftKey)
+                        .textFieldStyle(PlainTextFieldStyle())
+                        .padding()
+                        .background(Color.adolfikPanel)
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                        .font(.system(size: 14, design: .monospaced))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+
+                    Text("Ключ хранится только на этом устройстве (AppStorage) и вводится один раз.")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.gray)
+
+                    Spacer()
+
+                    Button(action: {
+                        apiKey = draftKey
+                        dismiss()
+                    }) {
+                        Text("СОХРАНИТЬ")
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.adolfikAccent)
+                            .cornerRadius(8)
+                    }
+                    .disabled(draftKey.isEmpty)
+                }
+                .padding()
+            }
+            .navigationTitle("Настройки")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Закрыть") { dismiss() }
+                        .foregroundColor(.adolfikAccent)
+                }
+            }
+        }
+        .onAppear {
+            draftKey = apiKey
+        }
+        .preferredColorScheme(.dark)
     }
 }
