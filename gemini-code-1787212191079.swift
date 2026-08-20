@@ -2,6 +2,244 @@ import SwiftUI
 import AVFoundation
 import Speech
 
+// MARK: - Telegram Connection
+class TelegramConnection: ObservableObject {
+    @Published var isConnected = false
+    @Published var lastResponse = ""
+    @Published var systemInfo = ""
+    @Published var screenshot: UIImage?
+    
+    private var botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
+    private var apiBase: String {
+        return "https://api.telegram.org/bot\(botToken)"
+    }
+    private var lastUpdateId: Int64 = 0
+    private var pollingTimer: Timer?
+    private var isPolling = false
+    
+    init() {
+        startPolling()
+    }
+    
+    // MARK: - Send Message
+    func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
+        guard !text.isEmpty else { return }
+        
+        let urlString = "\(apiBase)/sendMessage"
+        guard let url = URL(string: urlString) else { return }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        // Получаем chat_id из getUpdates
+        getChatId { chatId in
+            guard let chatId = chatId else {
+                DispatchQueue.main.async {
+                    self.lastResponse = "❌ Не удалось получить chat_id. Отправьте сообщение боту в Telegram."
+                    completion?(false, self.lastResponse)
+                }
+                return
+            }
+            
+            let body: [String: Any] = [
+                "chat_id": chatId,
+                "text": text,
+                "parse_mode": "HTML"
+            ]
+            
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            
+            URLSession.shared.dataTask(with: request) { data, response, error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        self.lastResponse = "❌ Ошибка: \(error.localizedDescription)"
+                        completion?(false, self.lastResponse)
+                        return
+                    }
+                    
+                    if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                        self.lastResponse = "❌ HTTP \(httpResponse.statusCode)"
+                        completion?(false, self.lastResponse)
+                        return
+                    }
+                    
+                    self.lastResponse = "✅ Команда отправлена"
+                    completion?(true, self.lastResponse)
+                }
+            }.resume()
+        }
+    }
+    
+    // MARK: - Get Chat ID
+    func getChatId(completion: @escaping (Int64?) -> Void) {
+        let urlString = "\(apiBase)/getUpdates"
+        guard let url = URL(string: urlString) else {
+            completion(nil)
+            return
+        }
+        
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? [[String: Any]] else {
+                completion(nil)
+                return
+            }
+            
+            // Ищем последнее сообщение с chat_id
+            for update in result.reversed() {
+                if let message = update["message"] as? [String: Any],
+                   let chat = message["chat"] as? [String: Any],
+                   let chatId = chat["id"] as? Int64 {
+                    completion(chatId)
+                    return
+                }
+            }
+            
+            completion(nil)
+        }.resume()
+    }
+    
+    // MARK: - Start Polling
+    func startPolling() {
+        guard !isPolling else { return }
+        isPolling = true
+        isConnected = true
+        
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.checkUpdates()
+        }
+    }
+    
+    func stopPolling() {
+        isPolling = false
+        isConnected = false
+        pollingTimer?.invalidate()
+        pollingTimer = nil
+    }
+    
+    private func checkUpdates() {
+        let urlString = "\(apiBase)/getUpdates?offset=\(lastUpdateId + 1)&timeout=5"
+        guard let url = URL(string: urlString) else { return }
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            guard let self = self,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? [[String: Any]] else {
+                return
+            }
+            
+            for update in result {
+                if let updateId = update["update_id"] as? Int64 {
+                    self.lastUpdateId = updateId
+                }
+                
+                if let message = update["message"] as? [String: Any],
+                   let text = message["text"] as? String {
+                    DispatchQueue.main.async {
+                        self.lastResponse = text
+                        self.parseResponse(text)
+                    }
+                }
+            }
+        }.resume()
+    }
+    
+    private func parseResponse(_ text: String) {
+        // Парсим ответ от ПК
+        if text.contains("✅") {
+            // Успешное выполнение
+            lastResponse = text.replacingOccurrences(of: "✅", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if text.contains("❌") {
+            // Ошибка
+            lastResponse = text.replacingOccurrences(of: "❌", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+    
+    // MARK: - Voice Commands
+    func sendVoiceCommand(_ text: String) {
+        sendCommand("🎤 Голосовая команда: \(text)")
+    }
+    
+    func sendTextMessage(_ text: String) {
+        sendCommand(text)
+    }
+    
+    func requestSystemInfo() {
+        sendCommand("/system_info")
+    }
+    
+    func controlMedia(_ action: String) {
+        let commands = [
+            "prev": "Предыдущий трек",
+            "toggle": "Пауза",
+            "next": "Следующий трек"
+        ]
+        if let command = commands[action] {
+            sendCommand(command)
+        }
+    }
+    
+    func searchMusic(_ query: String) {
+        sendCommand("Включи \(query)")
+    }
+    
+    func controlTor(_ action: String) {
+        let commands = [
+            "connect": "Включи Tor",
+            "disconnect": "Выключи Tor",
+            "new_identity": "Новая личность Tor"
+        ]
+        if let command = commands[action] {
+            sendCommand(command)
+        }
+    }
+    
+    func takeScreenshot() {
+        sendCommand("Сделай скриншот")
+    }
+    
+    func controlVolume(_ volume: Int) {
+        sendCommand("Громкость \(volume)")
+    }
+    
+    func launchApp(_ app: String) {
+        let commands = [
+            "chrome": "Открой Chrome",
+            "notepad": "Открой блокнот",
+            "explorer": "Открой проводник",
+            "cmd": "Открой командную строку"
+        ]
+        if let command = commands[app] {
+            sendCommand(command)
+        }
+    }
+    
+    func powerControl(_ action: String) {
+        let commands = [
+            "lock": "Заблокируй ПК",
+            "sleep": "Спящий режим",
+            "reboot": "Перезагрузи ПК",
+            "shutdown": "Выключи ПК"
+        ]
+        if let command = commands[action] {
+            sendCommand(command)
+        }
+    }
+    
+    func switchAudioDevice(_ device: String) {
+        let commands = [
+            "speaker": "На колонку",
+            "headphones": "На наушники"
+        ]
+        if let command = commands[device] {
+            sendCommand(command)
+        }
+    }
+}
+
 // MARK: - Voice Assistant
 class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var synthesizer = AVSpeechSynthesizer()
@@ -18,7 +256,7 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var micAccessDenied = false
 
     @AppStorage("deepseek_api_key") var apiKey: String = ""
-    @Published var pcConnection: PCServerConnection?
+    @Published var telegramConnection: TelegramConnection?
     
     override init() {
         super.init()
@@ -66,8 +304,8 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
-        if sendToPC, let pcConnection = pcConnection, pcConnection.isConnected {
-            pcConnection.sendVoiceCommand(prompt)
+        if sendToPC, let tgConnection = telegramConnection, tgConnection.isConnected {
+            tgConnection.sendVoiceCommand(prompt)
             DispatchQueue.main.async {
                 self.assistantReply = "Команда отправлена на ПК: \(prompt)"
                 self.speak(self.assistantReply)
@@ -204,215 +442,6 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         try? audioEngine.start()
         isListening = true
         recognizedText = "Слушаю..."
-    }
-}
-
-// MARK: - PC Server Connection
-class PCServerConnection: ObservableObject {
-    @Published var isConnected = false
-    @Published var pcIP = "192.168.1.100"
-    @Published var pcPort = "8080"
-    @Published var authToken = "lupin_secure_token_2024"
-    @Published var lastResponse = ""
-    @Published var systemInfo = ""
-    @Published var screenshot: UIImage?
-    
-    private var webSocket: URLSessionWebSocketTask?
-    private var session: URLSession?
-    
-    func connect() {
-        var urlString = ""
-        
-        // Если это ngrok URL
-        if pcIP.contains("ngrok") {
-            urlString = "ws://\(pcIP):\(pcPort)"
-            print("🔗 Ngrok URL: \(urlString)")
-        } else {
-            urlString = "ws://\(pcIP):\(pcPort)"
-            print("🔗 Local URL: \(urlString)")
-        }
-        
-        guard let url = URL(string: urlString) else {
-            print("❌ Invalid URL: \(urlString)")
-            return
-        }
-        
-        print("🔗 Connecting to: \(url)")
-        
-        session = URLSession(configuration: .default)
-        webSocket = session?.webSocketTask(with: url)
-        webSocket?.resume()
-        
-        let authMessage: [String: Any] = ["auth": authToken]
-        sendJSON(authMessage)
-        
-        isConnected = true
-        startListening()
-    }
-    
-    func disconnect() {
-        webSocket?.cancel(with: .goingAway, reason: nil)
-        isConnected = false
-        print("🔌 Disconnected")
-    }
-    
-    private func sendJSON(_ data: [String: Any]) {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: data),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
-            print("❌ Can't serialize JSON")
-            return
-        }
-        
-        print("📤 Sending: \(jsonString)")
-        
-        webSocket?.send(.string(jsonString)) { [weak self] error in
-            if let error = error {
-                print("❌ Send error: \(error)")
-                DispatchQueue.main.async {
-                    self?.isConnected = false
-                }
-            } else {
-                print("✅ Message sent")
-            }
-        }
-    }
-    
-    private func startListening() {
-        webSocket?.receive { [weak self] result in
-            switch result {
-            case .success(let message):
-                switch message {
-                case .string(let text):
-                    print("📥 Received: \(text)")
-                    DispatchQueue.main.async {
-                        self?.handleResponse(text)
-                    }
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        print("📥 Received data: \(text)")
-                        DispatchQueue.main.async {
-                            self?.handleResponse(text)
-                        }
-                    }
-                @unknown default:
-                    break
-                }
-                self?.startListening()
-            case .failure(let error):
-                print("❌ Receive error: \(error)")
-                DispatchQueue.main.async {
-                    self?.isConnected = false
-                }
-            }
-        }
-    }
-    
-    private func handleResponse(_ text: String) {
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return
-        }
-        
-        if let screenshotBase64 = json["screenshot"] as? String,
-           let imageData = Data(base64Encoded: screenshotBase64),
-           let image = UIImage(data: imageData) {
-            screenshot = image
-        }
-        
-        if let data = json["data"] as? [String: Any] {
-            let cpu = data["cpu_percent"] ?? "N/A"
-            let ram = data["ram_percent"] ?? "N/A"
-            let disk = data["disk_percent"] ?? "N/A"
-            let ip = data["ip"] ?? "N/A"
-            let torIP = data["tor_ip"] ?? "N/A"
-            let gpu = data["gpu"] ?? "N/A"
-            let uptime = data["uptime"] ?? "N/A"
-            
-            systemInfo = """
-            💻 CPU: \(cpu)%
-            🧠 RAM: \(ram)%
-            💾 Disk: \(disk)%
-            🌐 IP: \(ip)
-            🔒 Tor IP: \(torIP)
-            🎮 GPU: \(gpu)
-            ⏱ Uptime: \(uptime)
-            """
-        }
-        
-        if let message = json["message"] as? String {
-            lastResponse = message
-        }
-    }
-    
-    func sendVoiceCommand(_ text: String) {
-        sendJSON([
-            "command": "voice_command",
-            "params": ["text": text]
-        ])
-    }
-    
-    func sendTextMessage(_ text: String) {
-        sendJSON([
-            "command": "send_message",
-            "params": ["text": text]
-        ])
-    }
-    
-    func requestSystemInfo() {
-        sendJSON(["command": "system_info"])
-    }
-    
-    func controlMedia(_ action: String) {
-        sendJSON([
-            "command": "media_control",
-            "params": ["action": action]
-        ])
-    }
-    
-    func searchMusic(_ query: String) {
-        sendJSON([
-            "command": "search_music",
-            "params": ["query": query]
-        ])
-    }
-    
-    func controlTor(_ action: String) {
-        sendJSON([
-            "command": "tor_control",
-            "params": ["action": action]
-        ])
-    }
-    
-    func takeScreenshot() {
-        sendJSON(["command": "screenshot"])
-    }
-    
-    func controlVolume(_ volume: Int) {
-        sendJSON([
-            "command": "volume_control",
-            "params": ["volume": volume]
-        ])
-    }
-    
-    func launchApp(_ app: String) {
-        sendJSON([
-            "command": "launch_app",
-            "params": ["app": app]
-        ])
-    }
-    
-    func powerControl(_ action: String) {
-        sendJSON([
-            "command": "power_control",
-            "params": ["action": action]
-        ])
-    }
-    
-    func switchAudioDevice(_ device: String) {
-        sendJSON([
-            "command": "audio_device",
-            "params": ["device": device]
-        ])
     }
 }
 
@@ -611,7 +640,7 @@ struct SectionView<Content: View>: View {
 // MARK: - Main Content View
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
-    @StateObject var pcConnection = PCServerConnection()
+    @StateObject var telegramConnection = TelegramConnection()
     @State private var showSettings = false
     @State private var showPCControls = false
     @State private var textInput = ""
@@ -650,11 +679,11 @@ struct ContentView: View {
                     Button(action: { showPCControls.toggle() }) {
                         HStack {
                             Circle()
-                                .fill(pcConnection.isConnected ? Color.lupinGreen : Color.lupinRed)
+                                .fill(telegramConnection.isConnected ? Color.lupinGreen : Color.lupinRed)
                                 .frame(width: 8, height: 8)
-                            Text(pcConnection.isConnected ? "PC ONLINE" : "PC OFFLINE")
+                            Text(telegramConnection.isConnected ? "TG ONLINE" : "TG OFFLINE")
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundColor(pcConnection.isConnected ? .lupinGreen : .lupinRed)
+                                .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -759,7 +788,7 @@ struct ContentView: View {
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
-                        if pcConnection.isConnected {
+                        if telegramConnection.isConnected {
                             assistant.sendToDeepSeek(prompt: assistant.recognizedText, sendToPC: true)
                         } else {
                             assistant.sendToDeepSeek(prompt: assistant.recognizedText)
@@ -784,13 +813,13 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(apiKey: $assistant.apiKey, pcConnection: pcConnection)
+            SettingsView(apiKey: $assistant.apiKey, telegramConnection: telegramConnection)
         }
         .sheet(isPresented: $showPCControls) {
-            PCControlView(pcConnection: pcConnection)
+            PCControlView(telegramConnection: telegramConnection)
         }
         .onAppear {
-            assistant.pcConnection = pcConnection
+            assistant.telegramConnection = telegramConnection
             if assistant.apiKey.isEmpty {
                 showSettings = true
             }
@@ -804,10 +833,10 @@ struct ContentView: View {
         textInput = ""
         
         print("📱 Sending command: \(command)")
-        print("📱 PC Connected: \(pcConnection.isConnected)")
+        print("📱 TG Connected: \(telegramConnection.isConnected)")
         
-        if pcConnection.isConnected {
-            pcConnection.sendTextMessage(command)
+        if telegramConnection.isConnected {
+            telegramConnection.sendTextMessage(command)
             assistant.assistantReply = "Отправлено на ПК: \(command)"
         } else {
             assistant.sendToDeepSeek(prompt: command)
@@ -817,7 +846,7 @@ struct ContentView: View {
 
 // MARK: - PC Control View
 struct PCControlView: View {
-    @ObservedObject var pcConnection: PCServerConnection
+    @ObservedObject var telegramConnection: TelegramConnection
     @Environment(\.dismiss) var dismiss
     @State private var volume: Double = 50
     @State private var musicQuery = ""
@@ -831,80 +860,48 @@ struct PCControlView: View {
                     VStack(spacing: 12) {
                         SectionView(title: "CONNECTION") {
                             VStack(spacing: 8) {
-                                TextField("PC IP Address", text: $pcConnection.pcIP)
-                                    .textFieldStyle(PlainTextFieldStyle())
+                                Text("Telegram Bot Connection")
                                     .font(.system(size: 13, design: .monospaced))
                                     .foregroundColor(.white)
-                                    .padding(8)
-                                    .background(Color.lupinBackground)
-                                    .cornerRadius(4)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .stroke(Color.lupinBorder, lineWidth: 1)
-                                    )
-                                    .autocapitalization(.none)
-                                    .disableAutocorrection(true)
                                 
-                                TextField("Port", text: $pcConnection.pcPort)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(8)
-                                    .background(Color.lupinBackground)
-                                    .cornerRadius(4)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .stroke(Color.lupinBorder, lineWidth: 1)
-                                    )
-                                    .keyboardType(.numberPad)
-                                
-                                SecureField("Auth Token", text: $pcConnection.authToken)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(8)
-                                    .background(Color.lupinBackground)
-                                    .cornerRadius(4)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .stroke(Color.lupinBorder, lineWidth: 1)
-                                    )
-                                    .autocapitalization(.none)
+                                Text("Status: \(telegramConnection.isConnected ? "ONLINE" : "OFFLINE")")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
                                 
                                 Button(action: {
-                                    if pcConnection.isConnected {
-                                        pcConnection.disconnect()
+                                    if telegramConnection.isConnected {
+                                        telegramConnection.stopPolling()
                                     } else {
-                                        pcConnection.connect()
+                                        telegramConnection.startPolling()
                                     }
                                 }) {
-                                    Text(pcConnection.isConnected ? "DISCONNECT" : "CONNECT")
+                                    Text(telegramConnection.isConnected ? "DISCONNECT" : "CONNECT")
                                         .font(.system(size: 13, weight: .bold, design: .monospaced))
                                         .foregroundColor(.black)
                                         .frame(maxWidth: .infinity)
                                         .padding(10)
-                                        .background(pcConnection.isConnected ? Color.lupinRed : Color.lupinGreen)
+                                        .background(telegramConnection.isConnected ? Color.lupinRed : Color.lupinGreen)
                                         .cornerRadius(4)
                                 }
                             }
                         }
                         
-                        if pcConnection.isConnected {
+                        if telegramConnection.isConnected {
                             SectionView(title: "SYSTEM INFO") {
-                                Text(pcConnection.systemInfo)
+                                Text(telegramConnection.systemInfo)
                                     .font(.system(size: 12, design: .monospaced))
                                     .foregroundColor(.white)
                                     .lineLimit(nil)
                                 
                                 Button("REFRESH INFO") {
-                                    pcConnection.requestSystemInfo()
+                                    telegramConnection.requestSystemInfo()
                                 }
                                 .buttonStyle(LupinButtonStyle(isActive: true))
                             }
                             
                             SectionView(title: "MEDIA CONTROL") {
                                 HStack(spacing: 20) {
-                                    Button(action: { pcConnection.controlMedia("prev") }) {
+                                    Button(action: { telegramConnection.controlMedia("prev") }) {
                                         Image(systemName: "backward.fill")
                                             .font(.system(size: 22))
                                             .foregroundColor(.lupinAccent)
@@ -918,7 +915,7 @@ struct PCControlView: View {
                                             )
                                     }
                                     
-                                    Button(action: { pcConnection.controlMedia("toggle") }) {
+                                    Button(action: { telegramConnection.controlMedia("toggle") }) {
                                         Image(systemName: "playpause.fill")
                                             .font(.system(size: 22))
                                             .foregroundColor(.black)
@@ -928,7 +925,7 @@ struct PCControlView: View {
                                             .cornerRadius(4)
                                     }
                                     
-                                    Button(action: { pcConnection.controlMedia("next") }) {
+                                    Button(action: { telegramConnection.controlMedia("next") }) {
                                         Image(systemName: "forward.fill")
                                             .font(.system(size: 22))
                                             .foregroundColor(.lupinAccent)
@@ -958,7 +955,7 @@ struct PCControlView: View {
                                     
                                     Button("SEARCH") {
                                         if !musicQuery.isEmpty {
-                                            pcConnection.searchMusic(musicQuery)
+                                            telegramConnection.searchMusic(musicQuery)
                                         }
                                     }
                                     .buttonStyle(LupinButtonStyle(isActive: true))
@@ -968,17 +965,17 @@ struct PCControlView: View {
                             SectionView(title: "TOR CONTROL") {
                                 HStack(spacing: 8) {
                                     Button("CONNECT") {
-                                        pcConnection.controlTor("connect")
+                                        telegramConnection.controlTor("connect")
                                     }
                                     .buttonStyle(LupinButtonStyle(isActive: true))
                                     
                                     Button("DISCONNECT") {
-                                        pcConnection.controlTor("disconnect")
+                                        telegramConnection.controlTor("disconnect")
                                     }
                                     .buttonStyle(LupinButtonStyle(isDanger: true))
                                     
                                     Button("NEW ID") {
-                                        pcConnection.controlTor("new_identity")
+                                        telegramConnection.controlTor("new_identity")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                 }
@@ -987,7 +984,7 @@ struct PCControlView: View {
                             SectionView(title: "VOLUME: \(Int(volume))%") {
                                 Slider(value: $volume, in: 0...100) { editing in
                                     if !editing {
-                                        pcConnection.controlVolume(Int(volume))
+                                        telegramConnection.controlVolume(Int(volume))
                                     }
                                 }
                                 .tint(.lupinAccent)
@@ -995,38 +992,30 @@ struct PCControlView: View {
                             
                             SectionView(title: "SCREENSHOT") {
                                 Button("TAKE SCREENSHOT") {
-                                    pcConnection.takeScreenshot()
+                                    telegramConnection.takeScreenshot()
                                 }
                                 .buttonStyle(LupinButtonStyle(isActive: true))
-                                
-                                if let screenshot = pcConnection.screenshot {
-                                    Image(uiImage: screenshot)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(maxHeight: 200)
-                                        .cornerRadius(4)
-                                }
                             }
                             
                             SectionView(title: "QUICK LAUNCH") {
                                 HStack(spacing: 8) {
                                     Button("CHROME") {
-                                        pcConnection.launchApp("chrome")
+                                        telegramConnection.launchApp("chrome")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                     
                                     Button("NOTEPAD") {
-                                        pcConnection.launchApp("notepad")
+                                        telegramConnection.launchApp("notepad")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                     
                                     Button("EXPLORER") {
-                                        pcConnection.launchApp("explorer")
+                                        telegramConnection.launchApp("explorer")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                     
                                     Button("CMD") {
-                                        pcConnection.launchApp("cmd")
+                                        telegramConnection.launchApp("cmd")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                 }
@@ -1035,22 +1024,22 @@ struct PCControlView: View {
                             SectionView(title: "POWER CONTROL") {
                                 HStack(spacing: 8) {
                                     Button("LOCK") {
-                                        pcConnection.powerControl("lock")
+                                        telegramConnection.powerControl("lock")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                     
                                     Button("SLEEP") {
-                                        pcConnection.powerControl("sleep")
+                                        telegramConnection.powerControl("sleep")
                                     }
                                     .buttonStyle(LupinButtonStyle())
                                     
                                     Button("REBOOT") {
-                                        pcConnection.powerControl("reboot")
+                                        telegramConnection.powerControl("reboot")
                                     }
                                     .buttonStyle(LupinButtonStyle(isDanger: true))
                                     
                                     Button("SHUTDOWN") {
-                                        pcConnection.powerControl("shutdown")
+                                        telegramConnection.powerControl("shutdown")
                                     }
                                     .buttonStyle(LupinButtonStyle(isDanger: true))
                                 }
@@ -1077,12 +1066,9 @@ struct PCControlView: View {
 // MARK: - Settings View
 struct SettingsView: View {
     @Binding var apiKey: String
-    @ObservedObject var pcConnection: PCServerConnection
+    @ObservedObject var telegramConnection: TelegramConnection
     @Environment(\.dismiss) var dismiss
     @State private var draftKey: String = ""
-    @State private var draftIP: String = ""
-    @State private var draftPort: String = ""
-    @State private var draftToken: String = ""
 
     var body: some View {
         NavigationView {
@@ -1106,74 +1092,24 @@ struct SettingsView: View {
                                 .autocapitalization(.none)
                                 .disableAutocorrection(true)
                             
-                            Text("Ключ хранится только на этом устройстве (AppStorage) и вводится один раз.")
+                            Text("Ключ хранится только на этом устройстве (AppStorage).")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.lupinTextDim)
                         }
                         
-                        SectionView(title: "PC CONNECTION") {
-                            TextField("PC IP Address", text: $draftIP)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white)
-                                .padding(10)
-                                .background(Color.lupinBackground)
-                                .cornerRadius(4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.lupinBorder, lineWidth: 1)
-                                )
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                            
-                            TextField("Port", text: $draftPort)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white)
-                                .padding(10)
-                                .background(Color.lupinBackground)
-                                .cornerRadius(4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.lupinBorder, lineWidth: 1)
-                                )
-                                .keyboardType(.numberPad)
-                            
-                            SecureField("Auth Token", text: $draftToken)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white)
-                                .padding(10)
-                                .background(Color.lupinBackground)
-                                .cornerRadius(4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.lupinBorder, lineWidth: 1)
-                                )
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                            
+                        SectionView(title: "TELEGRAM CONNECTION") {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Для подключения к ПК:")
+                                Text("Bot Token: 8602600416:AAGg...")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
-                                Text("• Локально: IP + Port 8080")
+                                Text("Статус: \(telegramConnection.isConnected ? "ONLINE" : "OFFLINE")")
                                     .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.lupinTextDim)
-                                Text("• Через Ngrok: URL + Port 443")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.lupinTextDim)
-                                Text("• Токен: lupin_secure_token_2024")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.lupinTextDim)
+                                    .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
                             }
                         }
                         
                         Button(action: {
                             apiKey = draftKey
-                            pcConnection.pcIP = draftIP
-                            pcConnection.pcPort = draftPort
-                            pcConnection.authToken = draftToken
                             dismiss()
                         }) {
                             Text("СОХРАНИТЬ")
@@ -1184,7 +1120,6 @@ struct SettingsView: View {
                                 .background(Color.lupinAccent)
                                 .cornerRadius(4)
                         }
-                        .disabled(draftKey.isEmpty && draftIP.isEmpty)
                     }
                     .padding()
                 }
@@ -1201,9 +1136,6 @@ struct SettingsView: View {
         }
         .onAppear {
             draftKey = apiKey
-            draftIP = pcConnection.pcIP
-            draftPort = pcConnection.pcPort
-            draftToken = pcConnection.authToken
         }
         .preferredColorScheme(.dark)
     }
