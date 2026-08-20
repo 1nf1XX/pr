@@ -427,10 +427,10 @@ struct LupinButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .bold, design: .monospaced))
-            .foregroundColor(foregroundColor)
+            .foregroundColor(foregroundColor(for: configuration))
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(backgroundColor)
+            .background(backgroundColor(for: configuration))
             .cornerRadius(4)
             .overlay(
                 RoundedRectangle(cornerRadius: 4)
@@ -440,7 +440,7 @@ struct LupinButtonStyle: ButtonStyle {
             .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
     
-    private var foregroundColor: Color {
+    private func foregroundColor(for configuration: Configuration) -> Color {
         if isActive {
             return .black
         } else if isDanger {
@@ -450,7 +450,7 @@ struct LupinButtonStyle: ButtonStyle {
         }
     }
     
-    private var backgroundColor: Color {
+    private func backgroundColor(for configuration: Configuration) -> Color {
         if configuration.isPressed {
             return .lupinAccentHover
         } else if isActive {
