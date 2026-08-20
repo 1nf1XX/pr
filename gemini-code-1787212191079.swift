@@ -2,7 +2,7 @@ import SwiftUI
 import AVFoundation
 import Speech
 
-class VoiceAssistant: ObservableObject {
+class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var synthesizer = AVSpeechSynthesizer()
     private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ru-RU"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -10,28 +10,60 @@ class VoiceAssistant: ObservableObject {
     private let audioEngine = AVAudioEngine()
 
     @Published var recognizedText = "Нажми на микрофон..."
-    @Published var assistantReply = "Система готова. Ожидание команды..."
+    @Published var assistantReply = "Система LUPIN на связи. Жду распоряжений."
     @Published var isListening = false
     @Published var isProcessing = false
+    @Published var isSpeaking = false
     @Published var micAccessDenied = false
 
     @AppStorage("deepseek_api_key") var apiKey: String = ""
 
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+
+    // Мужской голос + пониженный питч/скорость для "механического" звучания.
+    // Настоящий вокодер потребовал бы аудио-постобработки — это ближайшее,
+    // что даёт системный TTS.
+    private func pickVoice() -> AVSpeechSynthesisVoice? {
+        let voices = AVSpeechSynthesisVoice.speechVoices()
+        if let maleRuVoice = voices.first(where: { $0.language == "ru-RU" && $0.gender == .male }) {
+            return maleRuVoice
+        }
+        return AVSpeechSynthesisVoice(language: "ru-RU")
+    }
+
     func speak(_ text: String) {
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
-        utterance.rate = 0.5
+        utterance.voice = pickVoice()
+        utterance.rate = 0.46
+        utterance.pitchMultiplier = 0.78
+        utterance.postUtteranceDelay = 0.05
         synthesizer.speak(utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.isSpeaking = true }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.isSpeaking = false }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.isSpeaking = false }
     }
 
     func sendToDeepSeek(prompt: String) {
         guard !apiKey.isEmpty else {
             DispatchQueue.main.async {
-                self.assistantReply = "Ошибка: не введен API-ключ! Открой настройки."
+                self.assistantReply = "Ключ не задан. Открой настройки."
                 self.speak(self.assistantReply)
             }
             return
         }
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         guard let url = URL(string: "https://api.deepseek.com/chat/completions") else { return }
         var request = URLRequest(url: url)
@@ -39,10 +71,18 @@ class VoiceAssistant: ObservableObject {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        // Тон — сдержанный, точный помощник в духе Джарвиса,
+        // с лёгким шармом элегантного авантюриста, без грубости и наигранной дерзости.
+        let systemPrompt = """
+        Тебя зовут LUPIN — ИИ-ассистент. Стиль общения: сдержанный, точный, слегка ироничный, \
+        как у безупречного личного помощника. Отвечай по делу, кратко, без грубости и без \
+        наигранной дерзости. Лёгкий налёт элегантности и остроумия уместен, хамство — нет.
+        """
+
         let requestBody: [String: Any] = [
             "model": "deepseek-chat",
             "messages": [
-                ["role": "system", "content": "Ты голосовой ассистент Адольфик. Отвечай дерзко, коротко и по делу в стиле киберпанк/хакер."],
+                ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": prompt]
             ],
             "stream": false
@@ -150,12 +190,112 @@ class VoiceAssistant: ObservableObject {
     }
 }
 
-// Акцентный цвет вынесен один раз, чтобы не повторять RGB по всему файлу
 extension Color {
-    static let adolfikAccent = Color(red: 0.95, green: 0.9, blue: 0.2)
-    static let adolfikBackground = Color(red: 0.08, green: 0.08, blue: 0.1)
-    static let adolfikPanel = Color(red: 0.12, green: 0.12, blue: 0.15)
+    static let lupinAccent = Color(red: 0.95, green: 0.9, blue: 0.2)
+    static let lupinBackground = Color(red: 0.08, green: 0.08, blue: 0.1)
+    static let lupinPanel = Color(red: 0.12, green: 0.12, blue: 0.15)
 }
+
+// MARK: - Пиксельный персонаж
+
+/// Обобщённый пиксельный силуэт "элегантного вора/хакера" (шляпа, маска, плащ),
+/// а не конкретный лицензированный персонаж. Цвета взяты из палитры интерфейса.
+struct PixelLupinView: View {
+    let isListening: Bool
+    let isSpeaking: Bool
+
+    @State private var mouthOpen = false
+    @State private var bobUp = false
+
+    private let mouthTimer = Timer.publish(every: 0.22, on: .main, in: .common).autoconnect()
+    private let bobTimer = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
+
+    // 0 пусто · 1 шляпа · 2 кожа · 3 плащ · 4 тень плаща · 5 галстук/акцент · 7 рот · 8 маска/очки (акцент)
+    private let baseGrid: [[Int]] = [
+        [0,0,0,1,1,1,1,0,0,0],
+        [0,1,1,1,1,1,1,1,1,0],
+        [1,1,1,1,1,1,1,1,1,1],
+        [0,2,2,2,2,2,2,2,2,0],
+        [0,2,8,2,2,2,2,8,2,0],
+        [0,2,2,2,2,2,2,2,2,0],
+        [0,2,2,2,0,0,2,2,2,0],
+        [0,0,2,2,2,2,2,2,0,0],
+        [0,0,3,5,5,5,5,3,0,0],
+        [0,3,3,3,3,3,3,3,3,0],
+        [3,3,3,3,3,3,3,3,3,3],
+        [3,3,4,3,3,3,3,4,3,3],
+        [4,4,3,3,3,3,3,3,4,4],
+        [4,4,4,4,4,4,4,4,4,4]
+    ]
+
+    private var currentGrid: [[Int]] {
+        var grid = baseGrid
+        if mouthOpen {
+            grid[6] = [0,2,2,7,7,7,7,2,2,0]
+        } else {
+            grid[6] = [0,2,2,2,7,7,2,2,2,0]
+        }
+        return grid
+    }
+
+    private func pixelColor(for value: Int) -> Color {
+        switch value {
+        case 1: return Color(red: 0.16, green: 0.16, blue: 0.19) // шляпа
+        case 2: return Color(red: 0.86, green: 0.72, blue: 0.55) // кожа
+        case 3: return Color(red: 0.14, green: 0.14, blue: 0.18) // плащ
+        case 4: return Color(red: 0.09, green: 0.09, blue: 0.12) // тень плаща
+        case 5: return Color.lupinAccent                          // галстук
+        case 7: return Color.black.opacity(0.85)                  // рот
+        case 8: return Color.lupinAccent                          // маска/очки
+        default: return .clear
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let cols = baseGrid[0].count
+            let rows = baseGrid.count
+            let cell = min(geo.size.width / CGFloat(cols), geo.size.height / CGFloat(rows))
+            let originX = (geo.size.width - CGFloat(cols) * cell) / 2
+            let originY = (geo.size.height - CGFloat(rows) * cell) / 2
+
+            ZStack {
+                ForEach(0..<rows, id: \.self) { r in
+                    ForEach(0..<cols, id: \.self) { c in
+                        let value = currentGrid[r][c]
+                        if value != 0 {
+                            Rectangle()
+                                .fill(pixelColor(for: value))
+                                .frame(width: cell, height: cell)
+                                .position(
+                                    x: originX + CGFloat(c) * cell + cell / 2,
+                                    y: originY + CGFloat(r) * cell + cell / 2
+                                )
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 130, height: 175)
+        .offset(y: bobUp ? -5 : 0)
+        .shadow(color: Color.lupinAccent.opacity((isListening || isSpeaking) ? 0.5 : 0.15), radius: (isListening || isSpeaking) ? 14 : 6)
+        .onReceive(mouthTimer) { _ in
+            if isSpeaking {
+                mouthOpen.toggle()
+            } else if mouthOpen {
+                mouthOpen = false
+            }
+        }
+        .onReceive(bobTimer) { _ in
+            let duration = (isListening || isSpeaking) ? 0.35 : 0.9
+            withAnimation(.easeInOut(duration: duration)) {
+                bobUp.toggle()
+            }
+        }
+    }
+}
+
+// MARK: - Основной экран
 
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
@@ -163,16 +303,15 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            Color.adolfikBackground
+            Color.lupinBackground
                 .ignoresSafeArea()
 
-            VStack(spacing: 25) {
-                // Заголовок + шестеренка настроек
+            VStack(spacing: 20) {
                 HStack {
                     Spacer()
-                    Text("ADOLFIK // SUITE")
+                    Text("LUPIN // SUITE")
                         .font(.system(size: 22, weight: .bold, design: .monospaced))
-                        .foregroundColor(.adolfikAccent)
+                        .foregroundColor(.lupinAccent)
                     Spacer()
                 }
                 .overlay(
@@ -188,7 +327,9 @@ struct ContentView: View {
                 )
                 .padding(.top, 10)
 
-                // Блок ввода запроса
+                PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
+                    .padding(.top, 4)
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text("ВХОДЯЩИЙ ПОТОК:")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -199,15 +340,14 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding()
-                .background(Color.adolfikPanel)
+                .background(Color.lupinPanel)
                 .cornerRadius(10)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.adolfikAccent.opacity(0.3), lineWidth: 1)
+                        .stroke(Color.lupinAccent.opacity(0.3), lineWidth: 1)
                 )
                 .padding(.horizontal)
 
-                // Предупреждение о микрофоне, если доступ запрещен
                 if assistant.micAccessDenied {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -219,33 +359,31 @@ struct ContentView: View {
                     .padding(.horizontal)
                 }
 
-                // Блок ответа ИИ
                 VStack(alignment: .leading, spacing: 6) {
                     Text("ОТВЕТ ЯДРА:")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .foregroundColor(.gray)
                     if assistant.isProcessing {
                         ProgressView()
-                            .tint(.adolfikAccent)
+                            .tint(.lupinAccent)
                     } else {
                         Text(assistant.assistantReply)
                             .font(.system(size: 15, design: .monospaced))
-                            .foregroundColor(.adolfikAccent)
+                            .foregroundColor(.lupinAccent)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .padding()
-                .background(Color.adolfikPanel)
+                .background(Color.lupinPanel)
                 .cornerRadius(10)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.adolfikAccent, lineWidth: 1)
+                        .stroke(Color.lupinAccent, lineWidth: 1)
                 )
                 .padding(.horizontal)
 
                 Spacer()
 
-                // Кнопка микрофона в неоновом стиле
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
@@ -258,9 +396,9 @@ struct ContentView: View {
                         .font(.system(size: 35))
                         .foregroundColor(.black)
                         .padding(25)
-                        .background(assistant.isListening ? Color.red : Color.adolfikAccent)
+                        .background(assistant.isListening ? Color.red : Color.lupinAccent)
                         .clipShape(Circle())
-                        .shadow(color: (assistant.isListening ? Color.red : Color.adolfikAccent).opacity(0.5), radius: 10)
+                        .shadow(color: (assistant.isListening ? Color.red : Color.lupinAccent).opacity(0.5), radius: 10)
                 }
 
                 Text(assistant.isListening ? "ИДЕТ ЗАПИСЬ..." : "НАЖМИ ДЛЯ ВВОДА")
@@ -269,7 +407,6 @@ struct ContentView: View {
                     .padding(.bottom, 20)
             }
         }
-        // Ключ вводится один раз через настройки — пустой ключ сам открывает лист
         .sheet(isPresented: $showSettings) {
             SettingsView(apiKey: $assistant.apiKey)
         }
@@ -289,7 +426,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                Color.adolfikBackground.ignoresSafeArea()
+                Color.lupinBackground.ignoresSafeArea()
 
                 VStack(alignment: .leading, spacing: 16) {
                     Text("DEEPSEEK API KEY")
@@ -299,7 +436,7 @@ struct SettingsView: View {
                     SecureField("sk-...", text: $draftKey)
                         .textFieldStyle(PlainTextFieldStyle())
                         .padding()
-                        .background(Color.adolfikPanel)
+                        .background(Color.lupinPanel)
                         .foregroundColor(.white)
                         .cornerRadius(8)
                         .font(.system(size: 14, design: .monospaced))
@@ -325,7 +462,7 @@ struct SettingsView: View {
                             .foregroundColor(.black)
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(Color.adolfikAccent)
+                            .background(Color.lupinAccent)
                             .cornerRadius(8)
                     }
                     .disabled(draftKey.isEmpty)
@@ -337,7 +474,7 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Закрыть") { dismiss() }
-                        .foregroundColor(.adolfikAccent)
+                        .foregroundColor(.lupinAccent)
                 }
             }
         }
