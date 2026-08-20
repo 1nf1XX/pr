@@ -1,69 +1,42 @@
 import SwiftUI
 import AVFoundation
 import Speech
+import UIKit
 
-// MARK: - Telegram Connection (Только отправка)
+// MARK: - Telegram Connection (URL Scheme Method)
 class TelegramConnection: ObservableObject {
     @Published var isConnected = true
     @Published var lastResponse = ""
     
-    private var botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
-    private var chatId: Int64 = 7106785409
+    private var botUsername = "lupin_suite_bot" // Замени на username своего бота
     
-    private var apiBase: String {
-        return "https://api.telegram.org/bot\(botToken)"
-    }
-    
-    // MARK: - Send Message
+    // Отправка через URL Scheme (открывает Telegram с готовым текстом)
     func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
-        guard !text.isEmpty else { return }
+        let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
         
-        let urlString = "\(apiBase)/sendMessage"
-        guard let url = URL(string: urlString) else { return }
+        // Пробуем открыть Telegram с текстом
+        let urlString = "tg://msg?text=\(encodedText)"
         
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = [
-            "chat_id": chatId,
-            "text": text,
-            "parse_mode": "HTML"
-        ]
-        
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
-        print("📤 Sending to \(chatId): \(text)")
-        
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        if let url = URL(string: urlString) {
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                
-                if let error = error {
-                    self.lastResponse = "❌ Ошибка: \(error.localizedDescription)"
-                    print("❌ Error: \(error)")
-                    completion?(false, self.lastResponse)
-                    return
-                }
-                
-                if let data = data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let ok = json["ok"] as? Bool, ok {
-                    self.lastResponse = "✅ Отправлено"
-                    print("✅ Sent OK")
-                    completion?(true, "✅ Отправлено")
-                } else {
-                    self.lastResponse = "❌ Ошибка API"
-                    print("❌ API Error")
-                    completion?(false, "❌ Ошибка API")
+                UIApplication.shared.open(url) { success in
+                    if success {
+                        self.lastResponse = "✅ Telegram открыт\nНажмите Отправить"
+                        completion?(true, "Отправьте сообщение в Telegram")
+                    } else {
+                        // Fallback на web
+                        let webURL = URL(string: "https://t.me/\(self.botUsername)")!
+                        UIApplication.shared.open(webURL)
+                        completion?(false, "Открыт web Telegram")
+                    }
                 }
             }
-        }.resume()
+        }
     }
     
-    // MARK: - Commands
+    // MARK: - Все команды
     func sendVoiceCommand(_ text: String) {
-        sendCommand("🎤 \(text)")
+        sendCommand(text)
     }
     
     func sendTextMessage(_ text: String) {
@@ -71,7 +44,11 @@ class TelegramConnection: ObservableObject {
     }
     
     func requestSystemInfo() {
-        sendCommand("/system_info")
+        sendCommand("инфо")
+    }
+    
+    func getProcessList() {
+        sendCommand("процессы")
     }
     
     func controlMedia(_ action: String) {
@@ -101,7 +78,7 @@ class TelegramConnection: ObservableObject {
     }
     
     func takeScreenshot() {
-        sendCommand("сделай скриншот")
+        sendCommand("скриншот")
     }
     
     func controlVolume(_ volume: Int) {
@@ -113,7 +90,14 @@ class TelegramConnection: ObservableObject {
             "chrome": "открой хром",
             "notepad": "открой блокнот",
             "explorer": "открой проводник",
-            "cmd": "открой командную строку"
+            "cmd": "открой командную строку",
+            "calculator": "открой калькулятор",
+            "paint": "открой paint",
+            "word": "открой word",
+            "excel": "открой excel",
+            "steam": "открой steam",
+            "discord": "открой discord",
+            "taskmanager": "открой диспетчер"
         ]
         if let command = commands[app] {
             sendCommand(command)
@@ -140,6 +124,42 @@ class TelegramConnection: ObservableObject {
         if let command = commands[device] {
             sendCommand(command)
         }
+    }
+    
+    func getWifiPasswords() {
+        sendCommand("wifi пароли")
+    }
+    
+    func generatePassword() {
+        sendCommand("пароль")
+    }
+    
+    func getIP() {
+        sendCommand("ip адрес")
+    }
+    
+    func getTime() {
+        sendCommand("время")
+    }
+    
+    func clearTrash() {
+        sendCommand("очистить корзину")
+    }
+    
+    func clearClipboard() {
+        sendCommand("очистить буфер")
+    }
+    
+    func openURL(_ url: String) {
+        sendCommand("открой \(url)")
+    }
+    
+    func runCMD(_ command: String) {
+        sendCommand("команда \(command)")
+    }
+    
+    func killProcess(_ pid: Int) {
+        sendCommand("убить \(pid)")
     }
 }
 
@@ -207,11 +227,11 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
-        if sendToPC, let tgConnection = telegramConnection, tgConnection.isConnected {
+        if sendToPC, let tgConnection = telegramConnection {
             tgConnection.sendVoiceCommand(prompt)
             DispatchQueue.main.async {
-                self.assistantReply = "Команда отправлена на ПК: \(prompt)"
-                self.speak(self.assistantReply)
+                self.assistantReply = "Команда: \(prompt)\nОткрыт Telegram - нажмите Отправить"
+                self.speak("Команда отправлена в Telegram")
             }
             return
         }
@@ -255,7 +275,7 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
             if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
                 DispatchQueue.main.async {
-                    self.assistantReply = "Ошибка сервера: код \(httpResponse.statusCode). Проверь ключ или лимиты."
+                    self.assistantReply = "Ошибка сервера: код \(httpResponse.statusCode)"
                 }
                 return
             }
@@ -369,10 +389,10 @@ struct LupinButtonStyle: ButtonStyle {
     
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .bold, design: .monospaced))
+            .font(.system(size: 12, weight: .bold, design: .monospaced))
             .foregroundColor(foregroundColor(for: configuration))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(backgroundColor(for: configuration))
             .cornerRadius(4)
             .overlay(
@@ -584,7 +604,7 @@ struct ContentView: View {
                             Circle()
                                 .fill(Color.lupinGreen)
                                 .frame(width: 8, height: 8)
-                            Text("TG SEND MODE")
+                            Text("PC CONTROL")
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                                 .foregroundColor(.lupinGreen)
                         }
@@ -691,11 +711,7 @@ struct ContentView: View {
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
-                        if telegramConnection.isConnected {
-                            assistant.sendToDeepSeek(prompt: assistant.recognizedText, sendToPC: true)
-                        } else {
-                            assistant.sendToDeepSeek(prompt: assistant.recognizedText)
-                        }
+                        assistant.sendToDeepSeek(prompt: assistant.recognizedText, sendToPC: true)
                     } else {
                         assistant.startListening()
                     }
@@ -732,14 +748,8 @@ struct ContentView: View {
         let command = textInput
         textInput = ""
         
-        print("📱 Sending: \(command)")
-        
         telegramConnection.sendCommand(command) { success, response in
-            if success {
-                assistant.assistantReply = "✅ Отправлено на ПК: \(command)"
-            } else {
-                assistant.assistantReply = response
-            }
+            assistant.assistantReply = response
         }
     }
 }
@@ -750,6 +760,8 @@ struct PCControlView: View {
     @Environment(\.dismiss) var dismiss
     @State private var volume: Double = 50
     @State private var musicQuery = ""
+    @State private var urlInput = ""
+    @State private var cmdInput = ""
     
     var body: some View {
         NavigationView {
@@ -758,15 +770,39 @@ struct PCControlView: View {
                 
                 ScrollView {
                     VStack(spacing: 12) {
-                        SectionView(title: "CONNECTION") {
-                            VStack(spacing: 8) {
-                                Text("Telegram Send Mode")
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
+                        SectionView(title: "SYSTEM") {
+                            HStack(spacing: 8) {
+                                Button("INFO") {
+                                    telegramConnection.requestSystemInfo()
+                                }
+                                .buttonStyle(LupinButtonStyle(isActive: true))
                                 
-                                Text("Chat ID: 7106785409")
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(.lupinTextDim)
+                                Button("PROCESSES") {
+                                    telegramConnection.getProcessList()
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("SCREENSHOT") {
+                                    telegramConnection.takeScreenshot()
+                                }
+                                .buttonStyle(LupinButtonStyle(isActive: true))
+                            }
+                            
+                            HStack(spacing: 8) {
+                                Button("IP") {
+                                    telegramConnection.getIP()
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("TIME") {
+                                    telegramConnection.getTime()
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("PASSWORD") {
+                                    telegramConnection.generatePassword()
+                                }
+                                .buttonStyle(LupinButtonStyle())
                             }
                         }
                         
@@ -780,10 +816,6 @@ struct PCControlView: View {
                                         .padding(10)
                                         .background(Color.lupinBackground)
                                         .cornerRadius(4)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 4)
-                                                .stroke(Color.lupinBorder, lineWidth: 1)
-                                        )
                                 }
                                 
                                 Button(action: { telegramConnection.controlMedia("toggle") }) {
@@ -804,10 +836,6 @@ struct PCControlView: View {
                                         .padding(10)
                                         .background(Color.lupinBackground)
                                         .cornerRadius(4)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 4)
-                                                .stroke(Color.lupinBorder, lineWidth: 1)
-                                        )
                                 }
                             }
                             
@@ -819,10 +847,6 @@ struct PCControlView: View {
                                     .padding(8)
                                     .background(Color.lupinBackground)
                                     .cornerRadius(4)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .stroke(Color.lupinBorder, lineWidth: 1)
-                                    )
                                 
                                 Button("SEARCH") {
                                     if !musicQuery.isEmpty {
@@ -830,25 +854,6 @@ struct PCControlView: View {
                                     }
                                 }
                                 .buttonStyle(LupinButtonStyle(isActive: true))
-                            }
-                        }
-                        
-                        SectionView(title: "TOR CONTROL") {
-                            HStack(spacing: 8) {
-                                Button("CONNECT") {
-                                    telegramConnection.controlTor("connect")
-                                }
-                                .buttonStyle(LupinButtonStyle(isActive: true))
-                                
-                                Button("DISCONNECT") {
-                                    telegramConnection.controlTor("disconnect")
-                                }
-                                .buttonStyle(LupinButtonStyle(isDanger: true))
-                                
-                                Button("NEW ID") {
-                                    telegramConnection.controlTor("new_identity")
-                                }
-                                .buttonStyle(LupinButtonStyle())
                             }
                         }
                         
@@ -861,58 +866,110 @@ struct PCControlView: View {
                             .tint(.lupinAccent)
                         }
                         
-                        SectionView(title: "SCREENSHOT") {
-                            Button("TAKE SCREENSHOT") {
-                                telegramConnection.takeScreenshot()
+                        SectionView(title: "QUICK LAUNCH") {
+                            HStack(spacing: 6) {
+                                Button("CHROME") { telegramConnection.launchApp("chrome") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("NOTEPAD") { telegramConnection.launchApp("notepad") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("EXPLORER") { telegramConnection.launchApp("explorer") }
+                                    .buttonStyle(LupinButtonStyle())
                             }
-                            .buttonStyle(LupinButtonStyle(isActive: true))
+                            
+                            HStack(spacing: 6) {
+                                Button("CMD") { telegramConnection.launchApp("cmd") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("CALC") { telegramConnection.launchApp("calculator") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("PAINT") { telegramConnection.launchApp("paint") }
+                                    .buttonStyle(LupinButtonStyle())
+                            }
+                            
+                            HStack(spacing: 6) {
+                                Button("WORD") { telegramConnection.launchApp("word") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("STEAM") { telegramConnection.launchApp("steam") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("DISCORD") { telegramConnection.launchApp("discord") }
+                                    .buttonStyle(LupinButtonStyle())
+                            }
                         }
                         
-                        SectionView(title: "QUICK LAUNCH") {
+                        SectionView(title: "TOR CONTROL") {
                             HStack(spacing: 8) {
-                                Button("CHROME") {
-                                    telegramConnection.launchApp("chrome")
-                                }
-                                .buttonStyle(LupinButtonStyle())
+                                Button("CONNECT") { telegramConnection.controlTor("connect") }
+                                    .buttonStyle(LupinButtonStyle(isActive: true))
                                 
-                                Button("NOTEPAD") {
-                                    telegramConnection.launchApp("notepad")
-                                }
-                                .buttonStyle(LupinButtonStyle())
+                                Button("DISCONNECT") { telegramConnection.controlTor("disconnect") }
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
                                 
-                                Button("EXPLORER") {
-                                    telegramConnection.launchApp("explorer")
-                                }
-                                .buttonStyle(LupinButtonStyle())
-                                
-                                Button("CMD") {
-                                    telegramConnection.launchApp("cmd")
-                                }
-                                .buttonStyle(LupinButtonStyle())
+                                Button("NEW ID") { telegramConnection.controlTor("new_identity") }
+                                    .buttonStyle(LupinButtonStyle())
                             }
                         }
                         
                         SectionView(title: "POWER CONTROL") {
                             HStack(spacing: 8) {
-                                Button("LOCK") {
-                                    telegramConnection.powerControl("lock")
+                                Button("LOCK") { telegramConnection.powerControl("lock") }
+                                    .buttonStyle(LupinButtonStyle())
+                                
+                                Button("SLEEP") { telegramConnection.powerControl("sleep") }
+                                    .buttonStyle(LupinButtonStyle())
+                                
+                                Button("REBOOT") { telegramConnection.powerControl("reboot") }
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
+                                
+                                Button("SHUTDOWN") { telegramConnection.powerControl("shutdown") }
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
+                            }
+                        }
+                        
+                        SectionView(title: "NETWORK") {
+                            HStack(spacing: 8) {
+                                Button("WIFI PASS") { telegramConnection.getWifiPasswords() }
+                                    .buttonStyle(LupinButtonStyle(isActive: true))
+                                
+                                Button("CLEAR TRASH") { telegramConnection.clearTrash() }
+                                    .buttonStyle(LupinButtonStyle())
+                                
+                                Button("CLEAR CLIP") { telegramConnection.clearClipboard() }
+                                    .buttonStyle(LupinButtonStyle())
+                            }
+                        }
+                        
+                        SectionView(title: "URL / CMD") {
+                            HStack(spacing: 8) {
+                                TextField("URL...", text: $urlInput)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(Color.lupinBackground)
+                                    .cornerRadius(4)
+                                
+                                Button("OPEN") {
+                                    if !urlInput.isEmpty {
+                                        telegramConnection.openURL(urlInput)
+                                    }
+                                }
+                                .buttonStyle(LupinButtonStyle(isActive: true))
+                            }
+                            
+                            HStack(spacing: 8) {
+                                TextField("CMD command...", text: $cmdInput)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(Color.lupinBackground)
+                                    .cornerRadius(4)
+                                
+                                Button("RUN") {
+                                    if !cmdInput.isEmpty {
+                                        telegramConnection.runCMD(cmdInput)
+                                    }
                                 }
                                 .buttonStyle(LupinButtonStyle())
-                                
-                                Button("SLEEP") {
-                                    telegramConnection.powerControl("sleep")
-                                }
-                                .buttonStyle(LupinButtonStyle())
-                                
-                                Button("REBOOT") {
-                                    telegramConnection.powerControl("reboot")
-                                }
-                                .buttonStyle(LupinButtonStyle(isDanger: true))
-                                
-                                Button("SHUTDOWN") {
-                                    telegramConnection.powerControl("shutdown")
-                                }
-                                .buttonStyle(LupinButtonStyle(isDanger: true))
                             }
                         }
                     }
@@ -965,10 +1022,10 @@ struct SettingsView: View {
                         
                         SectionView(title: "TELEGRAM") {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Chat ID: 7106785409")
+                                Text("Метод: URL Scheme")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinGreen)
-                                Text("Режим: Только отправка")
+                                Text("Кнопки открывают Telegram с готовой командой")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
                             }
