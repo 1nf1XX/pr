@@ -10,10 +10,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install XcodeGen & ImageMagick
-        run: brew install xcodegen imagemagick
+      - name: Install XcodeGen
+        run: brew install xcodegen
 
-      - name: Prepare Assets & Icon
+      - name: Prepare Sources & Generate Xcode Project
         run: |
           mkdir -p Sources
           mv *.swift Sources/ContentView.swift || true
@@ -34,29 +34,6 @@ jobs:
           EOF
           fi
 
-          # Настройка иконки приложения
-          if [ -f "icon.png" ]; then
-            mkdir -p Assets.xcassets/AppIcon.appiconset
-            magick icon.png -resize 1024x1024 Assets.xcassets/AppIcon.appiconset/icon_1024.png
-            
-            cat << 'EOF' > Assets.xcassets/AppIcon.appiconset/Contents.json
-            {
-              "images": [
-                {
-                  "filename": "icon_1024.png",
-                  "idiom": "universal",
-                  "platform": "ios",
-                  "size": "1024x1024"
-                }
-              ],
-              "info": {
-                "author": "xcode",
-                "version": 1
-              }
-            }
-            EOF
-          fi
-
           cat << 'EOF' > project.yml
           name: LupinApp
           options:
@@ -69,9 +46,7 @@ jobs:
             LupinApp:
               type: application
               platform: iOS
-              sources: 
-                - Sources
-                - Assets.xcassets
+              sources: [Sources]
               info:
                 path: Info.plist
                 properties:
@@ -88,7 +63,6 @@ jobs:
                 CODE_SIGNING_REQUIRED: NO
                 DEVELOPMENT_TEAM: ""
                 PROVISIONING_PROFILE_SPECIFIER: ""
-                ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
           EOF
 
           xcodegen generate --spec project.yml
