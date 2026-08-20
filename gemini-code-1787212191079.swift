@@ -1,7 +1,9 @@
 import SwiftUI
 import AVFoundation
 import Speech
+import Network
 
+// MARK: - Voice Assistant
 class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var synthesizer = AVSpeechSynthesizer()
     private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ru-RU"))
@@ -17,15 +19,15 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var micAccessDenied = false
 
     @AppStorage("deepseek_api_key") var apiKey: String = ""
-
+    
+    // PC Connection
+    @Published var pcConnection: PCServerConnection?
+    
     override init() {
         super.init()
         synthesizer.delegate = self
     }
 
-    // Мужской голос + пониженный питч/скорость для "механического" звучания.
-    // Настоящий вокодер потребовал бы аудио-постобработки — это ближайшее,
-    // что даёт системный TTS.
     private func pickVoice() -> AVSpeechSynthesisVoice? {
         let voices = AVSpeechSynthesisVoice.speechVoices()
         if let maleRuVoice = voices.first(where: { $0.language == "ru-RU" && $0.gender == .male }) {
@@ -34,9 +36,6 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return AVSpeechSynthesisVoice(language: "ru-RU")
     }
 
-    // После записи речи сессия остаётся в режиме .record (только вход).
-    // TTS не может выдать звук, пока сессия не переключена на воспроизведение —
-    // это и была причина полной тишины.
     private func configurePlaybackSession() {
         let session = AVAudioSession.sharedInstance()
         do {
@@ -69,7 +68,17 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { self.isSpeaking = false }
     }
 
-    func sendToDeepSeek(prompt: String) {
+    func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
+        // Если нужно отправить на ПК
+        if sendToPC, let pcConnection = pcConnection, pcConnection.isConnected {
+            pcConnection.sendVoiceCommand(prompt)
+            DispatchQueue.main.async {
+                self.assistantReply = "Команда отправлена на ПК: \(prompt)"
+                self.speak(self.assistantReply)
+            }
+            return
+        }
+        
         guard !apiKey.isEmpty else {
             DispatchQueue.main.async {
                 self.assistantReply = "Ключ не задан. Открой настройки."
@@ -85,8 +94,6 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // Тон — сдержанный, точный помощник в духе Джарвиса,
-        // с лёгким шармом элегантного авантюриста, без грубости и наигранной дерзости.
         let systemPrompt = """
         Тебя зовут LUPIN — ИИ-ассистент. Стиль общения: сдержанный, точный, слегка ироничный, \
         как у безупречного личного помощника. Отвечай по делу, кратко, без грубости и без \
@@ -204,16 +211,212 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 }
 
+// MARK: - PC Server Connection
+class PCServerConnection: ObservableObject {
+    @Published var isConnected = false
+    @Published var pcIP = "192.168.1.100"
+    @Published var pcPort = "8080"
+    @Published var authToken = "lupin_secure_token_2024"
+    @Published var lastResponse = ""
+    @Published var systemInfo = ""
+    @Published var screenshot: UIImage?
+    
+    private var webSocket: URLSessionWebSocketTask?
+    private var session: URLSession?
+    
+    func connect() {
+        guard let url = URL(string: "ws://\(pcIP):\(pcPort)") else {
+            return
+        }
+        
+        session = URLSession(configuration: .default)
+        webSocket = session?.webSocketTask(with: url)
+        webSocket?.resume()
+        
+        // Авторизация
+        let authMessage: [String: Any] = ["auth": authToken]
+        sendJSON(authMessage)
+        
+        isConnected = true
+        startListening()
+    }
+    
+    func disconnect() {
+        webSocket?.cancel(with: .goingAway, reason: nil)
+        isConnected = false
+    }
+    
+    private func sendJSON(_ data: [String: Any]) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: data),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            return
+        }
+        
+        webSocket?.send(.string(jsonString)) { [weak self] error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    self?.isConnected = false
+                }
+            }
+        }
+    }
+    
+    private func startListening() {
+        webSocket?.receive { [weak self] result in
+            switch result {
+            case .success(let message):
+                switch message {
+                case .string(let text):
+                    DispatchQueue.main.async {
+                        self?.handleResponse(text)
+                    }
+                case .data(let data):
+                    if let text = String(data: data, encoding: .utf8) {
+                        DispatchQueue.main.async {
+                            self?.handleResponse(text)
+                        }
+                    }
+                @unknown default:
+                    break
+                }
+                self?.startListening()
+            case .failure(let error):
+                DispatchQueue.main.async {
+                    self?.isConnected = false
+                }
+            }
+        }
+    }
+    
+    private func handleResponse(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        
+        if let screenshotBase64 = json["screenshot"] as? String,
+           let imageData = Data(base64Encoded: screenshotBase64),
+           let image = UIImage(data: imageData) {
+            screenshot = image
+        }
+        
+        if let data = json["data"] as? [String: Any] {
+            let cpu = data["cpu_percent"] ?? "N/A"
+            let ram = data["ram_percent"] ?? "N/A"
+            let disk = data["disk_percent"] ?? "N/A"
+            let ip = data["ip"] ?? "N/A"
+            let torIP = data["tor_ip"] ?? "N/A"
+            let gpu = data["gpu"] ?? "N/A"
+            let uptime = data["uptime"] ?? "N/A"
+            
+            systemInfo = """
+            💻 CPU: \(cpu)%
+            🧠 RAM: \(ram)%
+            💾 Disk: \(disk)%
+            🌐 IP: \(ip)
+            🔒 Tor IP: \(torIP)
+            🎮 GPU: \(gpu)
+            ⏱ Uptime: \(uptime)
+            """
+        }
+        
+        if let message = json["message"] as? String {
+            lastResponse = message
+        }
+    }
+    
+    // Команды для отправки на ПК
+    func sendVoiceCommand(_ text: String) {
+        sendJSON([
+            "command": "voice_command",
+            "params": ["text": text]
+        ])
+    }
+    
+    func sendTextMessage(_ text: String) {
+        sendJSON([
+            "command": "send_message",
+            "params": ["text": text]
+        ])
+    }
+    
+    func requestSystemInfo() {
+        sendJSON(["command": "system_info"])
+    }
+    
+    func controlMedia(_ action: String) {
+        sendJSON([
+            "command": "media_control",
+            "params": ["action": action]
+        ])
+    }
+    
+    func searchMusic(_ query: String) {
+        sendJSON([
+            "command": "search_music",
+            "params": ["query": query]
+        ])
+    }
+    
+    func controlTor(_ action: String) {
+        sendJSON([
+            "command": "tor_control",
+            "params": ["action": action]
+        ])
+    }
+    
+    func takeScreenshot() {
+        sendJSON(["command": "screenshot"])
+    }
+    
+    func controlVolume(_ volume: Int) {
+        sendJSON([
+            "command": "volume_control",
+            "params": ["volume": volume]
+        ])
+    }
+    
+    func launchApp(_ app: String) {
+        sendJSON([
+            "command": "launch_app",
+            "params": ["app": app]
+        ])
+    }
+    
+    func powerControl(_ action: String) {
+        sendJSON([
+            "command": "power_control",
+            "params": ["action": action]
+        ])
+    }
+    
+    func getProcessList() {
+        sendJSON(["command": "process_list"])
+    }
+    
+    func killProcess(pid: Int) {
+        sendJSON([
+            "command": "kill_process",
+            "params": ["pid": pid]
+        ])
+    }
+    
+    func switchAudioDevice(_ device: String) {
+        sendJSON([
+            "command": "audio_device",
+            "params": ["device": device]
+        ])
+    }
+}
+
+// MARK: - Colors Extension
 extension Color {
     static let lupinAccent = Color(red: 0.95, green: 0.9, blue: 0.2)
     static let lupinBackground = Color(red: 0.08, green: 0.08, blue: 0.1)
     static let lupinPanel = Color(red: 0.12, green: 0.12, blue: 0.15)
 }
 
-// MARK: - Пиксельный персонаж
-
-/// Обобщённый пиксельный силуэт "элегантного вора/хакера" (шляпа, маска, плащ),
-/// а не конкретный лицензированный персонаж. Цвета взяты из палитры интерфейса.
+// MARK: - Pixel Character
 struct PixelLupinView: View {
     let isListening: Bool
     let isSpeaking: Bool
@@ -224,7 +427,6 @@ struct PixelLupinView: View {
     private let mouthTimer = Timer.publish(every: 0.22, on: .main, in: .common).autoconnect()
     private let bobTimer = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
 
-    // 0 пусто · 1 шляпа · 2 кожа · 3 плащ · 4 тень плаща · 5 галстук/акцент · 7 рот · 8 маска/очки (акцент)
     private let baseGrid: [[Int]] = [
         [0,0,0,1,1,1,1,0,0,0],
         [0,1,1,1,1,1,1,1,1,0],
@@ -254,13 +456,13 @@ struct PixelLupinView: View {
 
     private func pixelColor(for value: Int) -> Color {
         switch value {
-        case 1: return Color(red: 0.16, green: 0.16, blue: 0.19) // шляпа
-        case 2: return Color(red: 0.86, green: 0.72, blue: 0.55) // кожа
-        case 3: return Color(red: 0.14, green: 0.14, blue: 0.18) // плащ
-        case 4: return Color(red: 0.09, green: 0.09, blue: 0.12) // тень плаща
-        case 5: return Color.lupinAccent                          // галстук
-        case 7: return Color.black.opacity(0.85)                  // рот
-        case 8: return Color.lupinAccent                          // маска/очки
+        case 1: return Color(red: 0.16, green: 0.16, blue: 0.19)
+        case 2: return Color(red: 0.86, green: 0.72, blue: 0.55)
+        case 3: return Color(red: 0.14, green: 0.14, blue: 0.18)
+        case 4: return Color(red: 0.09, green: 0.09, blue: 0.12)
+        case 5: return Color.lupinAccent
+        case 7: return Color.black.opacity(0.85)
+        case 8: return Color.lupinAccent
         default: return .clear
         }
     }
@@ -309,11 +511,14 @@ struct PixelLupinView: View {
     }
 }
 
-// MARK: - Основной экран
-
+// MARK: - Main Content View
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
+    @StateObject var pcConnection = PCServerConnection()
     @State private var showSettings = false
+    @State private var showPCControls = false
+    @State private var textInput = ""
+    @State private var showTextInput = false
 
     var body: some View {
         ZStack {
@@ -343,6 +548,57 @@ struct ContentView: View {
 
                 PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
                     .padding(.top, 4)
+
+                // PC Connection Status
+                HStack {
+                    Button(action: { showPCControls.toggle() }) {
+                        HStack {
+                            Image(systemName: "desktopcomputer")
+                                .font(.system(size: 14))
+                            Text(pcConnection.isConnected ? "PC ONLINE" : "PC OFFLINE")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        }
+                        .foregroundColor(pcConnection.isConnected ? .green : .gray)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.lupinPanel)
+                        .cornerRadius(8)
+                    }
+                    
+                    Spacer()
+                    
+                    // Text Input Toggle
+                    Button(action: { showTextInput.toggle() }) {
+                        Image(systemName: "keyboard")
+                            .font(.system(size: 16))
+                            .foregroundColor(.lupinAccent)
+                            .padding(8)
+                            .background(Color.lupinPanel)
+                            .cornerRadius(8)
+                    }
+                }
+                .padding(.horizontal)
+
+                // Text Input Field
+                if showTextInput {
+                    HStack {
+                        TextField("Введите команду...", text: $textInput)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .font(.system(size: 14, design: .monospaced))
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .submitLabel(.send)
+                            .onSubmit {
+                                sendTextCommand()
+                            }
+                        
+                        Button(action: sendTextCommand) {
+                            Image(systemName: "paperplane.fill")
+                                .foregroundColor(.lupinAccent)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("ВХОДЯЩИЙ ПОТОК:")
@@ -381,10 +637,13 @@ struct ContentView: View {
                         ProgressView()
                             .tint(.lupinAccent)
                     } else {
-                        Text(assistant.assistantReply)
-                            .font(.system(size: 15, design: .monospaced))
-                            .foregroundColor(.lupinAccent)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ScrollView {
+                            Text(assistant.assistantReply)
+                                .font(.system(size: 15, design: .monospaced))
+                                .foregroundColor(.lupinAccent)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 150)
                     }
                 }
                 .padding()
@@ -398,10 +657,16 @@ struct ContentView: View {
 
                 Spacer()
 
+                // Microphone Button
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
-                        assistant.sendToDeepSeek(prompt: assistant.recognizedText)
+                        // Send to PC if connected, otherwise to DeepSeek
+                        if pcConnection.isConnected {
+                            assistant.sendToDeepSeek(prompt: assistant.recognizedText, sendToPC: true)
+                        } else {
+                            assistant.sendToDeepSeek(prompt: assistant.recognizedText)
+                        }
                     } else {
                         assistant.startListening()
                     }
@@ -422,66 +687,472 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(apiKey: $assistant.apiKey)
+            SettingsView(apiKey: $assistant.apiKey, pcConnection: pcConnection)
+        }
+        .sheet(isPresented: $showPCControls) {
+            PCControlView(pcConnection: pcConnection)
         }
         .onAppear {
+            assistant.pcConnection = pcConnection
             if assistant.apiKey.isEmpty {
                 showSettings = true
             }
         }
     }
+    
+    private func sendTextCommand() {
+        guard !textInput.isEmpty else { return }
+        
+        let command = textInput
+        textInput = ""
+        
+        // Send to PC if connected, otherwise to DeepSeek
+        if pcConnection.isConnected {
+            pcConnection.sendTextMessage(command)
+            assistant.assistantReply = "Отправлено на ПК: \(command)"
+        } else {
+            assistant.sendToDeepSeek(prompt: command)
+        }
+    }
 }
 
+// MARK: - PC Control View
+struct PCControlView: View {
+    @ObservedObject var pcConnection: PCServerConnection
+    @Environment(\.dismiss) var dismiss
+    @State private var volume: Double = 50
+    @State private var musicQuery = ""
+    @State private var showScreenshot = false
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.lupinBackground.ignoresSafeArea()
+                
+                ScrollView {
+                    VStack(spacing: 15) {
+                        // Connection Settings
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("CONNECTION")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundColor(.gray)
+                            
+                            VStack(spacing: 8) {
+                                TextField("PC IP Address", text: $pcConnection.pcIP)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                
+                                TextField("Port", text: $pcConnection.pcPort)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .keyboardType(.numberPad)
+                                
+                                SecureField("Auth Token", text: $pcConnection.authToken)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .autocapitalization(.none)
+                                
+                                Button(action: {
+                                    if pcConnection.isConnected {
+                                        pcConnection.disconnect()
+                                    } else {
+                                        pcConnection.connect()
+                                    }
+                                }) {
+                                    Text(pcConnection.isConnected ? "DISCONNECT" : "CONNECT")
+                                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.black)
+                                        .frame(maxWidth: .infinity)
+                                        .padding()
+                                        .background(pcConnection.isConnected ? Color.red : Color.green)
+                                        .cornerRadius(8)
+                                }
+                            }
+                        }
+                        .padding()
+                        .background(Color.lupinPanel)
+                        .cornerRadius(10)
+                        
+                        // System Info
+                        if pcConnection.isConnected {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("SYSTEM INFO")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                Text(pcConnection.systemInfo)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .lineLimit(nil)
+                                
+                                Button("Refresh Info") {
+                                    pcConnection.requestSystemInfo()
+                                }
+                                .foregroundColor(.lupinAccent)
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                            
+                            // Media Control
+                            VStack(spacing: 10) {
+                                Text("MEDIA CONTROL")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                HStack(spacing: 30) {
+                                    Button(action: { pcConnection.controlMedia("prev") }) {
+                                        Image(systemName: "backward.fill")
+                                            .font(.system(size: 25))
+                                            .foregroundColor(.lupinAccent)
+                                    }
+                                    
+                                    Button(action: { pcConnection.controlMedia("toggle") }) {
+                                        Image(systemName: "playpause.fill")
+                                            .font(.system(size: 25))
+                                            .foregroundColor(.lupinAccent)
+                                    }
+                                    
+                                    Button(action: { pcConnection.controlMedia("next") }) {
+                                        Image(systemName: "forward.fill")
+                                            .font(.system(size: 25))
+                                            .foregroundColor(.lupinAccent)
+                                    }
+                                }
+                                
+                                // Music Search
+                                HStack {
+                                    TextField("Поиск музыки...", text: $musicQuery)
+                                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                                        .font(.system(size: 14, design: .monospaced))
+                                    
+                                    Button("Search") {
+                                        if !musicQuery.isEmpty {
+                                            pcConnection.searchMusic(musicQuery)
+                                        }
+                                    }
+                                    .foregroundColor(.lupinAccent)
+                                }
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                            
+                            // Tor Control
+                            VStack(spacing: 10) {
+                                Text("TOR CONTROL")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                HStack(spacing: 10) {
+                                    Button("Connect") {
+                                        pcConnection.controlTor("connect")
+                                    }
+                                    .foregroundColor(.green)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("Disconnect") {
+                                        pcConnection.controlTor("disconnect")
+                                    }
+                                    .foregroundColor(.red)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("New Identity") {
+                                        pcConnection.controlTor("new_identity")
+                                    }
+                                    .foregroundColor(.lupinAccent)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                }
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                            
+                            // Volume Control
+                            VStack(spacing: 10) {
+                                Text("VOLUME: \(Int(volume))%")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                Slider(value: $volume, in: 0...100) { editing in
+                                    if !editing {
+                                        pcConnection.controlVolume(Int(volume))
+                                    }
+                                }
+                                .tint(.lupinAccent)
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                            
+                            // Screenshot
+                            VStack(spacing: 10) {
+                                Text("SCREENSHOT")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                Button("Take Screenshot") {
+                                    pcConnection.takeScreenshot()
+                                }
+                                .foregroundColor(.lupinAccent)
+                                .padding()
+                                .background(Color.lupinPanel)
+                                .cornerRadius(8)
+                                
+                                if let screenshot = pcConnection.screenshot {
+                                    Image(uiImage: screenshot)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(maxHeight: 200)
+                                        .cornerRadius(8)
+                                }
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                            
+                            // Quick Launch Apps
+                            VStack(spacing: 10) {
+                                Text("QUICK LAUNCH")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                HStack(spacing: 10) {
+                                    Button("Chrome") {
+                                        pcConnection.launchApp("chrome")
+                                    }
+                                    .foregroundColor(.blue)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("Notepad") {
+                                        pcConnection.launchApp("notepad")
+                                    }
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("Explorer") {
+                                        pcConnection.launchApp("explorer")
+                                    }
+                                    .foregroundColor(.yellow)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("CMD") {
+                                        pcConnection.launchApp("cmd")
+                                    }
+                                    .foregroundColor(.green)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                }
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                            
+                            // Power Control
+                            VStack(spacing: 10) {
+                                Text("POWER CONTROL")
+                                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.gray)
+                                
+                                HStack(spacing: 10) {
+                                    Button("Lock") {
+                                        pcConnection.powerControl("lock")
+                                    }
+                                    .foregroundColor(.yellow)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("Sleep") {
+                                        pcConnection.powerControl("sleep")
+                                    }
+                                    .foregroundColor(.blue)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("Reboot") {
+                                        pcConnection.powerControl("reboot")
+                                    }
+                                    .foregroundColor(.orange)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                    
+                                    Button("Shutdown") {
+                                        pcConnection.powerControl("shutdown")
+                                    }
+                                    .foregroundColor(.red)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.lupinPanel)
+                                    .cornerRadius(5)
+                                }
+                            }
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .cornerRadius(10)
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("PC CONTROL")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Close") { dismiss() }
+                        .foregroundColor(.lupinAccent)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+// MARK: - Settings View
 struct SettingsView: View {
     @Binding var apiKey: String
+    @ObservedObject var pcConnection: PCServerConnection
     @Environment(\.dismiss) var dismiss
     @State private var draftKey: String = ""
+    @State private var draftIP: String = ""
+    @State private var draftPort: String = ""
+    @State private var draftToken: String = ""
 
     var body: some View {
         NavigationView {
             ZStack {
                 Color.lupinBackground.ignoresSafeArea()
 
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("DEEPSEEK API KEY")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .foregroundColor(.gray)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("DEEPSEEK API KEY")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(.gray)
 
-                    SecureField("sk-...", text: $draftKey)
-                        .textFieldStyle(PlainTextFieldStyle())
-                        .padding()
-                        .background(Color.lupinPanel)
-                        .foregroundColor(.white)
-                        .cornerRadius(8)
-                        .font(.system(size: 14, design: .monospaced))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                        )
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-
-                    Text("Ключ хранится только на этом устройстве (AppStorage) и вводится один раз.")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.gray)
-
-                    Spacer()
-
-                    Button(action: {
-                        apiKey = draftKey
-                        dismiss()
-                    }) {
-                        Text("СОХРАНИТЬ")
-                            .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
+                        SecureField("sk-...", text: $draftKey)
+                            .textFieldStyle(PlainTextFieldStyle())
                             .padding()
-                            .background(Color.lupinAccent)
+                            .background(Color.lupinPanel)
+                            .foregroundColor(.white)
                             .cornerRadius(8)
+                            .font(.system(size: 14, design: .monospaced))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            )
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+
+                        Text("Ключ хранится только на этом устройстве (AppStorage) и вводится один раз.")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.gray)
+
+                        Divider()
+                            .background(Color.gray.opacity(0.3))
+
+                        Text("PC CONNECTION")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(.gray)
+
+                        TextField("PC IP Address", text: $draftIP)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .font(.system(size: 14, design: .monospaced))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            )
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+
+                        TextField("Port", text: $draftPort)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .font(.system(size: 14, design: .monospaced))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            )
+                            .keyboardType(.numberPad)
+
+                        SecureField("Auth Token", text: $draftToken)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .padding()
+                            .background(Color.lupinPanel)
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .font(.system(size: 14, design: .monospaced))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            )
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+
+                        Text("Для подключения к ПК убедитесь, что:")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.gray)
+                        Text("• LUPIN SUITE запущен на ПК")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.gray)
+                        Text("• Оба устройства в одной Wi-Fi сети")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.gray)
+                        Text("• Порт 8080 не заблокирован")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.gray)
+
+                        Spacer()
+
+                        Button(action: {
+                            apiKey = draftKey
+                            pcConnection.pcIP = draftIP
+                            pcConnection.pcPort = draftPort
+                            pcConnection.authToken = draftToken
+                            dismiss()
+                        }) {
+                            Text("СОХРАНИТЬ")
+                                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.lupinAccent)
+                                .cornerRadius(8)
+                        }
+                        .disabled(draftKey.isEmpty && draftIP.isEmpty)
                     }
-                    .disabled(draftKey.isEmpty)
+                    .padding()
                 }
-                .padding()
             }
             .navigationTitle("Настройки")
             .navigationBarTitleDisplayMode(.inline)
@@ -494,7 +1165,20 @@ struct SettingsView: View {
         }
         .onAppear {
             draftKey = apiKey
+            draftIP = pcConnection.pcIP
+            draftPort = pcConnection.pcPort
+            draftToken = pcConnection.authToken
         }
         .preferredColorScheme(.dark)
+    }
+}
+
+// MARK: - App Entry Point
+@main
+struct LupinApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
     }
 }
