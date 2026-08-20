@@ -10,17 +10,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen & ImageMagick
+        run: brew install xcodegen imagemagick
 
-      - name: Prepare Sources & Generate Xcode Project
+      - name: Prepare Sources & Icon
         run: |
           mkdir -p Sources
           mv *.swift Sources/ContentView.swift || true
 
           if ! grep -q "@main" Sources/ContentView.swift; then
             cat << 'EOF' >> Sources/ContentView.swift
-
           import SwiftUI
 
           @main
@@ -30,6 +29,29 @@ jobs:
                       ContentView()
                   }
               }
+          }
+          EOF
+          fi
+
+          # Конвертируем иконку, если она загружена в репозиторий
+          if [ -f "icon.png" ]; then
+            mkdir -p Assets.xcassets/AppIcon.appiconset
+            magick icon.png -resize 1024x1024 Assets.xcassets/AppIcon.appiconset/icon_1024.png
+            
+            cat << 'EOF' > Assets.xcassets/AppIcon.appiconset/Contents.json
+          {
+            "images": [
+              {
+                "filename": "icon_1024.png",
+                "idiom": "universal",
+                "platform": "ios",
+                "size": "1024x1024"
+              }
+            ],
+            "info": {
+              "author": "xcode",
+              "version": 1
+            }
           }
           EOF
           fi
@@ -46,7 +68,9 @@ jobs:
             LupinApp:
               type: application
               platform: iOS
-              sources: [Sources]
+              sources: 
+                - Sources
+                - Assets.xcassets
               info:
                 path: Info.plist
                 properties:
@@ -57,12 +81,15 @@ jobs:
                   CFBundleShortVersionString: "1.0"
                   CFBundleVersion: "1"
                   UILaunchScreen: {}
+                  NSSpeechRecognitionUsageDescription: "Разреши доступ для распознавания твоих команд"
+                  NSMicrophoneUsageDescription: "Разреши микрофон, чтобы ассистент мог тебя слышать"
               settings:
                 PRODUCT_BUNDLE_IDENTIFIER: com.lupin.app
                 CODE_SIGNING_ALLOWED: NO
                 CODE_SIGNING_REQUIRED: NO
                 DEVELOPMENT_TEAM: ""
                 PROVISIONING_PROFILE_SPECIFIER: ""
+                ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
           EOF
 
           xcodegen generate --spec project.yml
