@@ -1,0 +1,44 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Swift & Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+      - name: Create Swift Package Structure
+        run: |
+          mkdir -p LupinApp/Sources
+          mv ContentView.swift LupinApp/Sources/
+          cat << 'EOF' > LupinApp/Package.swift
+          // swift-tools-version:5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "LupinApp",
+              platforms: [.iOS(.v16)],
+              products: [.executable(name: "LupinApp", targets: ["LupinApp"])],
+              targets: [.target(name: "LupinApp", path: "Sources")]
+          )
+          EOF
+
+      - name: Build App Payload
+        run: |
+          cd LupinApp
+          swift build -c release --triple arm64-apple-ios16.0
+          mkdir -p Payload/LupinApp.app
+          cp .build/arm64-apple-ios16.0/release/LupinApp Payload/LupinApp.app/
+          zip -r ../LupinApp.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: LupinApp-Unsigned
+          path: LupinApp.ipa
