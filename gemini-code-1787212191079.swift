@@ -2,81 +2,21 @@ import SwiftUI
 import AVFoundation
 import Speech
 
-// MARK: - Telegram Connection
+// MARK: - Telegram Connection (Только отправка)
 class TelegramConnection: ObservableObject {
-    @Published var isConnected = false
+    @Published var isConnected = true
     @Published var lastResponse = ""
-    @Published var systemInfo = ""
-    @Published var screenshot: UIImage?
     
     private var botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
-    // Жестко зашитый chat_id - замените на ваш после первого сообщения боту
-    private var chatId: Int64 = 7106785409 // 0 = автоопределение
+    private var chatId: Int64 = 7106785409
     
     private var apiBase: String {
         return "https://api.telegram.org/bot\(botToken)"
-    }
-    private var lastUpdateId: Int64 = 0
-    private var pollingTimer: Timer?
-    private var isPolling = false
-    
-    init() {
-        // Пытаемся получить chat_id при запуске
-        fetchChatId()
-        startPolling()
-    }
-    
-    // MARK: - Fetch Chat ID
-    func fetchChatId() {
-        let urlString = "\(apiBase)/getUpdates"
-        guard let url = URL(string: urlString) else { return }
-        
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
-            guard let self = self,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [[String: Any]] else {
-                return
-            }
-            
-            // Ищем последнее сообщение с chat_id
-            for update in result.reversed() {
-                if let message = update["message"] as? [String: Any],
-                   let chat = message["chat"] as? [String: Any],
-                   let id = chat["id"] as? Int64 {
-                    DispatchQueue.main.async {
-                        self.chatId = id
-                        print("📱 Chat ID found: \(id)")
-                    }
-                    break
-                }
-            }
-        }.resume()
     }
     
     // MARK: - Send Message
     func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
         guard !text.isEmpty else { return }
-        
-        // Если chat_id не найден, пытаемся получить
-        if chatId == 0 {
-            fetchChatId()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.performSend(text: text, completion: completion)
-            }
-        } else {
-            performSend(text: text, completion: completion)
-        }
-    }
-    
-    private func performSend(text: String, completion: ((Bool, String) -> Void)? = nil) {
-        guard chatId != 0 else {
-            DispatchQueue.main.async {
-                self.lastResponse = "❌ Chat ID не найден. Отправьте любое сообщение боту в Telegram!"
-                completion?(false, self.lastResponse)
-            }
-            return
-        }
         
         let urlString = "\(apiBase)/sendMessage"
         guard let url = URL(string: urlString) else { return }
@@ -93,7 +33,7 @@ class TelegramConnection: ObservableObject {
         
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
-        print("📤 Sending to chat \(chatId): \(text)")
+        print("📤 Sending to \(chatId): \(text)")
         
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -101,93 +41,27 @@ class TelegramConnection: ObservableObject {
                 
                 if let error = error {
                     self.lastResponse = "❌ Ошибка: \(error.localizedDescription)"
-                    print("❌ Send error: \(error)")
+                    print("❌ Error: \(error)")
                     completion?(false, self.lastResponse)
                     return
                 }
                 
                 if let data = data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    
-                    if let ok = json["ok"] as? Bool, ok {
-                        self.lastResponse = "✅ Команда отправлена"
-                        print("✅ Message sent successfully")
-                        completion?(true, self.lastResponse)
-                    } else {
-                        let description = json["description"] as? String ?? "Unknown error"
-                        self.lastResponse = "❌ \(description)"
-                        print("❌ API error: \(description)")
-                        completion?(false, self.lastResponse)
-                    }
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let ok = json["ok"] as? Bool, ok {
+                    self.lastResponse = "✅ Отправлено"
+                    print("✅ Sent OK")
+                    completion?(true, "✅ Отправлено")
                 } else {
-                    self.lastResponse = "❌ Ошибка отправки"
-                    completion?(false, self.lastResponse)
+                    self.lastResponse = "❌ Ошибка API"
+                    print("❌ API Error")
+                    completion?(false, "❌ Ошибка API")
                 }
             }
         }.resume()
     }
     
-    // MARK: - Start Polling
-    func startPolling() {
-        guard !isPolling else { return }
-        isPolling = true
-        isConnected = true
-        
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.checkUpdates()
-        }
-        
-        print("📱 Polling started")
-    }
-    
-    func stopPolling() {
-        isPolling = false
-        isConnected = false
-        pollingTimer?.invalidate()
-        pollingTimer = nil
-        print("📱 Polling stopped")
-    }
-    
-    private func checkUpdates() {
-        let urlString = "\(apiBase)/getUpdates?offset=\(lastUpdateId + 1)&timeout=10"
-        guard let url = URL(string: urlString) else { return }
-        
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
-            guard let self = self,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return
-            }
-            
-            if let ok = json["ok"] as? Bool, ok,
-               let result = json["result"] as? [[String: Any]] {
-                
-                for update in result {
-                    if let updateId = update["update_id"] as? Int64 {
-                        self.lastUpdateId = updateId
-                    }
-                    
-                    if let message = update["message"] as? [String: Any],
-                       let chat = message["chat"] as? [String: Any],
-                       let id = chat["id"] as? Int64 {
-                        DispatchQueue.main.async {
-                            self.chatId = id
-                        }
-                    }
-                    
-                    if let message = update["message"] as? [String: Any],
-                       let text = message["text"] as? String {
-                        DispatchQueue.main.async {
-                            print("📥 Received: \(text)")
-                            self.lastResponse = text
-                        }
-                    }
-                }
-            }
-        }.resume()
-    }
-    
-    // MARK: - Voice Commands
+    // MARK: - Commands
     func sendVoiceCommand(_ text: String) {
         sendCommand("🎤 \(text)")
     }
@@ -708,11 +582,11 @@ struct ContentView: View {
                     Button(action: { showPCControls.toggle() }) {
                         HStack {
                             Circle()
-                                .fill(telegramConnection.isConnected ? Color.lupinGreen : Color.lupinRed)
+                                .fill(Color.lupinGreen)
                                 .frame(width: 8, height: 8)
-                            Text(telegramConnection.isConnected ? "TG ONLINE" : "TG OFFLINE")
+                            Text("TG SEND MODE")
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
+                                .foregroundColor(.lupinGreen)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -858,7 +732,7 @@ struct ContentView: View {
         let command = textInput
         textInput = ""
         
-        print("📱 Sending command: \(command)")
+        print("📱 Sending: \(command)")
         
         telegramConnection.sendCommand(command) { success, response in
             if success {
@@ -886,31 +760,14 @@ struct PCControlView: View {
                     VStack(spacing: 12) {
                         SectionView(title: "CONNECTION") {
                             VStack(spacing: 8) {
-                                Text("Telegram Bot Connection")
+                                Text("Telegram Send Mode")
                                     .font(.system(size: 13, design: .monospaced))
                                     .foregroundColor(.white)
                                 
-                                Text("Status: \(telegramConnection.isConnected ? "ONLINE" : "OFFLINE")")
+                                Text("Chat ID: 7106785409")
                                     .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
-                                
-                                Button("REFRESH CHAT ID") {
-                                    telegramConnection.fetchChatId()
-                                }
-                                .buttonStyle(LupinButtonStyle(isActive: true))
+                                    .foregroundColor(.lupinTextDim)
                             }
-                        }
-                        
-                        SectionView(title: "SYSTEM INFO") {
-                            Text(telegramConnection.systemInfo)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.white)
-                                .lineLimit(nil)
-                            
-                            Button("REFRESH INFO") {
-                                telegramConnection.requestSystemInfo()
-                            }
-                            .buttonStyle(LupinButtonStyle(isActive: true))
                         }
                         
                         SectionView(title: "MEDIA CONTROL") {
@@ -1104,20 +961,16 @@ struct SettingsView: View {
                                 )
                                 .autocapitalization(.none)
                                 .disableAutocorrection(true)
-                            
-                            Text("Ключ хранится только на этом устройстве (AppStorage).")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.lupinTextDim)
                         }
                         
-                        SectionView(title: "TELEGRAM CONNECTION") {
+                        SectionView(title: "TELEGRAM") {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Bot Token: 8602600416:AAGg...")
+                                Text("Chat ID: 7106785409")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.lupinGreen)
+                                Text("Режим: Только отправка")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
-                                Text("Статус: \(telegramConnection.isConnected ? "ONLINE" : "OFFLINE")")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
                             }
                         }
                         
