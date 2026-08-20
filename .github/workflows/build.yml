@@ -15,29 +15,26 @@ jobs:
         with:
           xcode-version: '15.4'
 
-      - name: Create Xcode Project & Build
+      - name: Setup Package File
         run: |
-          mkdir -p LupinApp
-          mv *.swift LupinApp/main.swift
-          
-          # Создаем проект через swift package
-          cd LupinApp
-          swift package init --type executable
-          rm -rf Sources/LupinApp/main.swift
-          mv main.swift Sources/LupinApp/main.swift
-          
-          # Сборка через нативный xcodebuild под iOS
-          xcodebuild -scheme LupinApp \
-            -destination 'generic/platform=iOS' \
-            -configuration Release \
-            -archivePath build/LupinApp.xcarchive \
-            CODE_SIGNING_ALLOWED=NO \
-            archive
+          cat << 'EOF' > Package.swift
+          // swift-tools-version:5.9
+          import PackageDescription
 
-          # Упаковка в .ipa
-          mkdir -p Payload
-          cp -r build/LupinApp.xcarchive/Products/usr/local/bin/LupinApp Payload/ 2>/dev/null || cp -r build/LupinApp.xcarchive/Products/Applications/*.app Payload/ 2>/dev/null || true
-          zip -r ../LupinApp.ipa Payload
+          let package = Package(
+              name: "LupinApp",
+              platforms: [.iOS(.v16)],
+              products: [.library(name: "LupinApp", targets: ["LupinApp"])],
+              targets: [.target(name: "LupinApp", path: ".")]
+          )
+          EOF
+
+      - name: Compile App
+        run: |
+          swift build -c release --triple arm64-apple-ios16.0
+          mkdir -p Payload/LupinApp.app
+          cp -r .build/arm64-apple-ios16.0/release/LupinApp Payload/LupinApp.app/ 2>/dev/null || true
+          zip -r LupinApp.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
