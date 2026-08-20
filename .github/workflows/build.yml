@@ -18,7 +18,9 @@ jobs:
       - name: Create Swift Package Structure
         run: |
           mkdir -p LupinApp/Sources
-          mv ContentView.swift LupinApp/Sources/
+          # Автоматически находит любой .swift файл в корне и переносит его
+          mv *.swift LupinApp/Sources/ContentView.swift
+          
           cat << 'EOF' > LupinApp/Package.swift
           // swift-tools-version:5.9
           import PackageDescription
