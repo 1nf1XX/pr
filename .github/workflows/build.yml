@@ -18,6 +18,23 @@ jobs:
           mkdir -p Sources
           mv *.swift Sources/ContentView.swift || true
 
+          # Автоматически добавляем точку входа @main, если её нет в файле
+          if ! grep -q "@main" Sources/ContentView.swift; then
+            cat << 'EOF' >> Sources/ContentView.swift
+
+          import SwiftUI
+
+          @main
+          struct LupinAppLauncher: App {
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                  }
+              }
+          }
+          EOF
+          fi
+
           cat << 'EOF' > project.yml
           name: LupinApp
           options:
@@ -39,10 +56,7 @@ jobs:
                 PROVISIONING_PROFILE_SPECIFIER: ""
           EOF
 
-          # Принудительно генерируем проект совместимого формата
           xcodegen generate --spec project.yml
-
-          # Исправляем версию формата прямо в файле проекта
           sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' LupinApp.xcodeproj/project.pbxproj || true
 
       - name: Build App with Xcodebuild
