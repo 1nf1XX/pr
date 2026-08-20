@@ -10,6 +10,9 @@ class TelegramConnection: ObservableObject {
     @Published var screenshot: UIImage?
     
     private var botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
+    // Жестко зашитый chat_id - замените на ваш после первого сообщения боту
+    private var chatId: Int64 = 7106785409 // 0 = автоопределение
+    
     private var apiBase: String {
         return "https://api.telegram.org/bot\(botToken)"
     }
@@ -18,109 +21,14 @@ class TelegramConnection: ObservableObject {
     private var isPolling = false
     
     init() {
+        // Пытаемся получить chat_id при запуске
+        fetchChatId()
         startPolling()
     }
     
-    // MARK: - Send Message
-    func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
-        guard !text.isEmpty else { return }
-        
-        let urlString = "\(apiBase)/sendMessage"
-        guard let url = URL(string: urlString) else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        // Получаем chat_id из getUpdates
-        getChatId { chatId in
-            guard let chatId = chatId else {
-                DispatchQueue.main.async {
-                    self.lastResponse = "❌ Не удалось получить chat_id. Отправьте сообщение боту в Telegram."
-                    completion?(false, self.lastResponse)
-                }
-                return
-            }
-            
-            let body: [String: Any] = [
-                "chat_id": chatId,
-                "text": text,
-                "parse_mode": "HTML"
-            ]
-            
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            
-            URLSession.shared.dataTask(with: request) { data, response, error in
-                DispatchQueue.main.async {
-                    if let error = error {
-                        self.lastResponse = "❌ Ошибка: \(error.localizedDescription)"
-                        completion?(false, self.lastResponse)
-                        return
-                    }
-                    
-                    if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-                        self.lastResponse = "❌ HTTP \(httpResponse.statusCode)"
-                        completion?(false, self.lastResponse)
-                        return
-                    }
-                    
-                    self.lastResponse = "✅ Команда отправлена"
-                    completion?(true, self.lastResponse)
-                }
-            }.resume()
-        }
-    }
-    
-    // MARK: - Get Chat ID
-    func getChatId(completion: @escaping (Int64?) -> Void) {
+    // MARK: - Fetch Chat ID
+    func fetchChatId() {
         let urlString = "\(apiBase)/getUpdates"
-        guard let url = URL(string: urlString) else {
-            completion(nil)
-            return
-        }
-        
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [[String: Any]] else {
-                completion(nil)
-                return
-            }
-            
-            // Ищем последнее сообщение с chat_id
-            for update in result.reversed() {
-                if let message = update["message"] as? [String: Any],
-                   let chat = message["chat"] as? [String: Any],
-                   let chatId = chat["id"] as? Int64 {
-                    completion(chatId)
-                    return
-                }
-            }
-            
-            completion(nil)
-        }.resume()
-    }
-    
-    // MARK: - Start Polling
-    func startPolling() {
-        guard !isPolling else { return }
-        isPolling = true
-        isConnected = true
-        
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.checkUpdates()
-        }
-    }
-    
-    func stopPolling() {
-        isPolling = false
-        isConnected = false
-        pollingTimer?.invalidate()
-        pollingTimer = nil
-    }
-    
-    private func checkUpdates() {
-        let urlString = "\(apiBase)/getUpdates?offset=\(lastUpdateId + 1)&timeout=5"
         guard let url = URL(string: urlString) else { return }
         
         URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
@@ -131,36 +39,157 @@ class TelegramConnection: ObservableObject {
                 return
             }
             
-            for update in result {
-                if let updateId = update["update_id"] as? Int64 {
-                    self.lastUpdateId = updateId
+            // Ищем последнее сообщение с chat_id
+            for update in result.reversed() {
+                if let message = update["message"] as? [String: Any],
+                   let chat = message["chat"] as? [String: Any],
+                   let id = chat["id"] as? Int64 {
+                    DispatchQueue.main.async {
+                        self.chatId = id
+                        print("📱 Chat ID found: \(id)")
+                    }
+                    break
+                }
+            }
+        }.resume()
+    }
+    
+    // MARK: - Send Message
+    func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
+        guard !text.isEmpty else { return }
+        
+        // Если chat_id не найден, пытаемся получить
+        if chatId == 0 {
+            fetchChatId()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.performSend(text: text, completion: completion)
+            }
+        } else {
+            performSend(text: text, completion: completion)
+        }
+    }
+    
+    private func performSend(text: String, completion: ((Bool, String) -> Void)? = nil) {
+        guard chatId != 0 else {
+            DispatchQueue.main.async {
+                self.lastResponse = "❌ Chat ID не найден. Отправьте любое сообщение боту в Telegram!"
+                completion?(false, self.lastResponse)
+            }
+            return
+        }
+        
+        let urlString = "\(apiBase)/sendMessage"
+        guard let url = URL(string: urlString) else { return }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body: [String: Any] = [
+            "chat_id": chatId,
+            "text": text,
+            "parse_mode": "HTML"
+        ]
+        
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        print("📤 Sending to chat \(chatId): \(text)")
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                
+                if let error = error {
+                    self.lastResponse = "❌ Ошибка: \(error.localizedDescription)"
+                    print("❌ Send error: \(error)")
+                    completion?(false, self.lastResponse)
+                    return
                 }
                 
-                if let message = update["message"] as? [String: Any],
-                   let text = message["text"] as? String {
-                    DispatchQueue.main.async {
-                        self.lastResponse = text
-                        self.parseResponse(text)
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    
+                    if let ok = json["ok"] as? Bool, ok {
+                        self.lastResponse = "✅ Команда отправлена"
+                        print("✅ Message sent successfully")
+                        completion?(true, self.lastResponse)
+                    } else {
+                        let description = json["description"] as? String ?? "Unknown error"
+                        self.lastResponse = "❌ \(description)"
+                        print("❌ API error: \(description)")
+                        completion?(false, self.lastResponse)
+                    }
+                } else {
+                    self.lastResponse = "❌ Ошибка отправки"
+                    completion?(false, self.lastResponse)
+                }
+            }
+        }.resume()
+    }
+    
+    // MARK: - Start Polling
+    func startPolling() {
+        guard !isPolling else { return }
+        isPolling = true
+        isConnected = true
+        
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.checkUpdates()
+        }
+        
+        print("📱 Polling started")
+    }
+    
+    func stopPolling() {
+        isPolling = false
+        isConnected = false
+        pollingTimer?.invalidate()
+        pollingTimer = nil
+        print("📱 Polling stopped")
+    }
+    
+    private func checkUpdates() {
+        let urlString = "\(apiBase)/getUpdates?offset=\(lastUpdateId + 1)&timeout=10"
+        guard let url = URL(string: urlString) else { return }
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            guard let self = self,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return
+            }
+            
+            if let ok = json["ok"] as? Bool, ok,
+               let result = json["result"] as? [[String: Any]] {
+                
+                for update in result {
+                    if let updateId = update["update_id"] as? Int64 {
+                        self.lastUpdateId = updateId
+                    }
+                    
+                    if let message = update["message"] as? [String: Any],
+                       let chat = message["chat"] as? [String: Any],
+                       let id = chat["id"] as? Int64 {
+                        DispatchQueue.main.async {
+                            self.chatId = id
+                        }
+                    }
+                    
+                    if let message = update["message"] as? [String: Any],
+                       let text = message["text"] as? String {
+                        DispatchQueue.main.async {
+                            print("📥 Received: \(text)")
+                            self.lastResponse = text
+                        }
                     }
                 }
             }
         }.resume()
     }
     
-    private func parseResponse(_ text: String) {
-        // Парсим ответ от ПК
-        if text.contains("✅") {
-            // Успешное выполнение
-            lastResponse = text.replacingOccurrences(of: "✅", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if text.contains("❌") {
-            // Ошибка
-            lastResponse = text.replacingOccurrences(of: "❌", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-    
     // MARK: - Voice Commands
     func sendVoiceCommand(_ text: String) {
-        sendCommand("🎤 Голосовая команда: \(text)")
+        sendCommand("🎤 \(text)")
     }
     
     func sendTextMessage(_ text: String) {
@@ -173,9 +202,9 @@ class TelegramConnection: ObservableObject {
     
     func controlMedia(_ action: String) {
         let commands = [
-            "prev": "Предыдущий трек",
-            "toggle": "Пауза",
-            "next": "Следующий трек"
+            "prev": "предыдущий трек",
+            "toggle": "пауза",
+            "next": "следующий трек"
         ]
         if let command = commands[action] {
             sendCommand(command)
@@ -183,14 +212,14 @@ class TelegramConnection: ObservableObject {
     }
     
     func searchMusic(_ query: String) {
-        sendCommand("Включи \(query)")
+        sendCommand("включи \(query)")
     }
     
     func controlTor(_ action: String) {
         let commands = [
-            "connect": "Включи Tor",
-            "disconnect": "Выключи Tor",
-            "new_identity": "Новая личность Tor"
+            "connect": "включи тор",
+            "disconnect": "выключи тор",
+            "new_identity": "новая личность"
         ]
         if let command = commands[action] {
             sendCommand(command)
@@ -198,19 +227,19 @@ class TelegramConnection: ObservableObject {
     }
     
     func takeScreenshot() {
-        sendCommand("Сделай скриншот")
+        sendCommand("сделай скриншот")
     }
     
     func controlVolume(_ volume: Int) {
-        sendCommand("Громкость \(volume)")
+        sendCommand("громкость \(volume)")
     }
     
     func launchApp(_ app: String) {
         let commands = [
-            "chrome": "Открой Chrome",
-            "notepad": "Открой блокнот",
-            "explorer": "Открой проводник",
-            "cmd": "Открой командную строку"
+            "chrome": "открой хром",
+            "notepad": "открой блокнот",
+            "explorer": "открой проводник",
+            "cmd": "открой командную строку"
         ]
         if let command = commands[app] {
             sendCommand(command)
@@ -219,10 +248,10 @@ class TelegramConnection: ObservableObject {
     
     func powerControl(_ action: String) {
         let commands = [
-            "lock": "Заблокируй ПК",
-            "sleep": "Спящий режим",
-            "reboot": "Перезагрузи ПК",
-            "shutdown": "Выключи ПК"
+            "lock": "заблокируй пк",
+            "sleep": "спящий режим",
+            "reboot": "перезагрузи пк",
+            "shutdown": "выключи пк"
         ]
         if let command = commands[action] {
             sendCommand(command)
@@ -231,8 +260,8 @@ class TelegramConnection: ObservableObject {
     
     func switchAudioDevice(_ device: String) {
         let commands = [
-            "speaker": "На колонку",
-            "headphones": "На наушники"
+            "speaker": "на колонку",
+            "headphones": "на наушники"
         ]
         if let command = commands[device] {
             sendCommand(command)
@@ -820,9 +849,6 @@ struct ContentView: View {
         }
         .onAppear {
             assistant.telegramConnection = telegramConnection
-            if assistant.apiKey.isEmpty {
-                showSettings = true
-            }
         }
     }
     
@@ -833,13 +859,13 @@ struct ContentView: View {
         textInput = ""
         
         print("📱 Sending command: \(command)")
-        print("📱 TG Connected: \(telegramConnection.isConnected)")
         
-        if telegramConnection.isConnected {
-            telegramConnection.sendTextMessage(command)
-            assistant.assistantReply = "Отправлено на ПК: \(command)"
-        } else {
-            assistant.sendToDeepSeek(prompt: command)
+        telegramConnection.sendCommand(command) { success, response in
+            if success {
+                assistant.assistantReply = "✅ Отправлено на ПК: \(command)"
+            } else {
+                assistant.assistantReply = response
+            }
         }
     }
 }
@@ -868,181 +894,168 @@ struct PCControlView: View {
                                     .font(.system(size: 12, design: .monospaced))
                                     .foregroundColor(telegramConnection.isConnected ? .lupinGreen : .lupinRed)
                                 
-                                Button(action: {
-                                    if telegramConnection.isConnected {
-                                        telegramConnection.stopPolling()
-                                    } else {
-                                        telegramConnection.startPolling()
-                                    }
-                                }) {
-                                    Text(telegramConnection.isConnected ? "DISCONNECT" : "CONNECT")
-                                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                                        .foregroundColor(.black)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(10)
-                                        .background(telegramConnection.isConnected ? Color.lupinRed : Color.lupinGreen)
-                                        .cornerRadius(4)
-                                }
-                            }
-                        }
-                        
-                        if telegramConnection.isConnected {
-                            SectionView(title: "SYSTEM INFO") {
-                                Text(telegramConnection.systemInfo)
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .lineLimit(nil)
-                                
-                                Button("REFRESH INFO") {
-                                    telegramConnection.requestSystemInfo()
+                                Button("REFRESH CHAT ID") {
+                                    telegramConnection.fetchChatId()
                                 }
                                 .buttonStyle(LupinButtonStyle(isActive: true))
                             }
+                        }
+                        
+                        SectionView(title: "SYSTEM INFO") {
+                            Text(telegramConnection.systemInfo)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.white)
+                                .lineLimit(nil)
                             
-                            SectionView(title: "MEDIA CONTROL") {
-                                HStack(spacing: 20) {
-                                    Button(action: { telegramConnection.controlMedia("prev") }) {
-                                        Image(systemName: "backward.fill")
-                                            .font(.system(size: 22))
-                                            .foregroundColor(.lupinAccent)
-                                            .frame(maxWidth: .infinity)
-                                            .padding(10)
-                                            .background(Color.lupinBackground)
-                                            .cornerRadius(4)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 4)
-                                                    .stroke(Color.lupinBorder, lineWidth: 1)
-                                            )
-                                    }
-                                    
-                                    Button(action: { telegramConnection.controlMedia("toggle") }) {
-                                        Image(systemName: "playpause.fill")
-                                            .font(.system(size: 22))
-                                            .foregroundColor(.black)
-                                            .frame(maxWidth: .infinity)
-                                            .padding(10)
-                                            .background(Color.lupinAccent)
-                                            .cornerRadius(4)
-                                    }
-                                    
-                                    Button(action: { telegramConnection.controlMedia("next") }) {
-                                        Image(systemName: "forward.fill")
-                                            .font(.system(size: 22))
-                                            .foregroundColor(.lupinAccent)
-                                            .frame(maxWidth: .infinity)
-                                            .padding(10)
-                                            .background(Color.lupinBackground)
-                                            .cornerRadius(4)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 4)
-                                                    .stroke(Color.lupinBorder, lineWidth: 1)
-                                            )
-                                    }
-                                }
-                                
-                                HStack(spacing: 8) {
-                                    TextField("Поиск музыки...", text: $musicQuery)
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .font(.system(size: 13, design: .monospaced))
-                                        .foregroundColor(.white)
-                                        .padding(8)
+                            Button("REFRESH INFO") {
+                                telegramConnection.requestSystemInfo()
+                            }
+                            .buttonStyle(LupinButtonStyle(isActive: true))
+                        }
+                        
+                        SectionView(title: "MEDIA CONTROL") {
+                            HStack(spacing: 20) {
+                                Button(action: { telegramConnection.controlMedia("prev") }) {
+                                    Image(systemName: "backward.fill")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.lupinAccent)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(10)
                                         .background(Color.lupinBackground)
                                         .cornerRadius(4)
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 4)
                                                 .stroke(Color.lupinBorder, lineWidth: 1)
                                         )
-                                    
-                                    Button("SEARCH") {
-                                        if !musicQuery.isEmpty {
-                                            telegramConnection.searchMusic(musicQuery)
-                                        }
-                                    }
-                                    .buttonStyle(LupinButtonStyle(isActive: true))
+                                }
+                                
+                                Button(action: { telegramConnection.controlMedia("toggle") }) {
+                                    Image(systemName: "playpause.fill")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.black)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(10)
+                                        .background(Color.lupinAccent)
+                                        .cornerRadius(4)
+                                }
+                                
+                                Button(action: { telegramConnection.controlMedia("next") }) {
+                                    Image(systemName: "forward.fill")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.lupinAccent)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(10)
+                                        .background(Color.lupinBackground)
+                                        .cornerRadius(4)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 4)
+                                                .stroke(Color.lupinBorder, lineWidth: 1)
+                                        )
                                 }
                             }
                             
-                            SectionView(title: "TOR CONTROL") {
-                                HStack(spacing: 8) {
-                                    Button("CONNECT") {
-                                        telegramConnection.controlTor("connect")
+                            HStack(spacing: 8) {
+                                TextField("Поиск музыки...", text: $musicQuery)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(Color.lupinBackground)
+                                    .cornerRadius(4)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(Color.lupinBorder, lineWidth: 1)
+                                    )
+                                
+                                Button("SEARCH") {
+                                    if !musicQuery.isEmpty {
+                                        telegramConnection.searchMusic(musicQuery)
                                     }
-                                    .buttonStyle(LupinButtonStyle(isActive: true))
-                                    
-                                    Button("DISCONNECT") {
-                                        telegramConnection.controlTor("disconnect")
-                                    }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
-                                    
-                                    Button("NEW ID") {
-                                        telegramConnection.controlTor("new_identity")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
-                                }
-                            }
-                            
-                            SectionView(title: "VOLUME: \(Int(volume))%") {
-                                Slider(value: $volume, in: 0...100) { editing in
-                                    if !editing {
-                                        telegramConnection.controlVolume(Int(volume))
-                                    }
-                                }
-                                .tint(.lupinAccent)
-                            }
-                            
-                            SectionView(title: "SCREENSHOT") {
-                                Button("TAKE SCREENSHOT") {
-                                    telegramConnection.takeScreenshot()
                                 }
                                 .buttonStyle(LupinButtonStyle(isActive: true))
                             }
-                            
-                            SectionView(title: "QUICK LAUNCH") {
-                                HStack(spacing: 8) {
-                                    Button("CHROME") {
-                                        telegramConnection.launchApp("chrome")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
-                                    
-                                    Button("NOTEPAD") {
-                                        telegramConnection.launchApp("notepad")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
-                                    
-                                    Button("EXPLORER") {
-                                        telegramConnection.launchApp("explorer")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
-                                    
-                                    Button("CMD") {
-                                        telegramConnection.launchApp("cmd")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
+                        }
+                        
+                        SectionView(title: "TOR CONTROL") {
+                            HStack(spacing: 8) {
+                                Button("CONNECT") {
+                                    telegramConnection.controlTor("connect")
+                                }
+                                .buttonStyle(LupinButtonStyle(isActive: true))
+                                
+                                Button("DISCONNECT") {
+                                    telegramConnection.controlTor("disconnect")
+                                }
+                                .buttonStyle(LupinButtonStyle(isDanger: true))
+                                
+                                Button("NEW ID") {
+                                    telegramConnection.controlTor("new_identity")
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                            }
+                        }
+                        
+                        SectionView(title: "VOLUME: \(Int(volume))%") {
+                            Slider(value: $volume, in: 0...100) { editing in
+                                if !editing {
+                                    telegramConnection.controlVolume(Int(volume))
                                 }
                             }
-                            
-                            SectionView(title: "POWER CONTROL") {
-                                HStack(spacing: 8) {
-                                    Button("LOCK") {
-                                        telegramConnection.powerControl("lock")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
-                                    
-                                    Button("SLEEP") {
-                                        telegramConnection.powerControl("sleep")
-                                    }
-                                    .buttonStyle(LupinButtonStyle())
-                                    
-                                    Button("REBOOT") {
-                                        telegramConnection.powerControl("reboot")
-                                    }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
-                                    
-                                    Button("SHUTDOWN") {
-                                        telegramConnection.powerControl("shutdown")
-                                    }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
+                            .tint(.lupinAccent)
+                        }
+                        
+                        SectionView(title: "SCREENSHOT") {
+                            Button("TAKE SCREENSHOT") {
+                                telegramConnection.takeScreenshot()
+                            }
+                            .buttonStyle(LupinButtonStyle(isActive: true))
+                        }
+                        
+                        SectionView(title: "QUICK LAUNCH") {
+                            HStack(spacing: 8) {
+                                Button("CHROME") {
+                                    telegramConnection.launchApp("chrome")
                                 }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("NOTEPAD") {
+                                    telegramConnection.launchApp("notepad")
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("EXPLORER") {
+                                    telegramConnection.launchApp("explorer")
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("CMD") {
+                                    telegramConnection.launchApp("cmd")
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                            }
+                        }
+                        
+                        SectionView(title: "POWER CONTROL") {
+                            HStack(spacing: 8) {
+                                Button("LOCK") {
+                                    telegramConnection.powerControl("lock")
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("SLEEP") {
+                                    telegramConnection.powerControl("sleep")
+                                }
+                                .buttonStyle(LupinButtonStyle())
+                                
+                                Button("REBOOT") {
+                                    telegramConnection.powerControl("reboot")
+                                }
+                                .buttonStyle(LupinButtonStyle(isDanger: true))
+                                
+                                Button("SHUTDOWN") {
+                                    telegramConnection.powerControl("shutdown")
+                                }
+                                .buttonStyle(LupinButtonStyle(isDanger: true))
                             }
                         }
                     }
