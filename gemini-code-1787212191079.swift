@@ -221,8 +221,19 @@ class PCServerConnection: ObservableObject {
     private var session: URLSession?
     
     func connect() {
-        guard let url = URL(string: "ws://\(pcIP):\(pcPort)") else {
-            print("❌ Invalid URL")
+        var urlString = ""
+        
+        // Если это ngrok URL
+        if pcIP.contains("ngrok") {
+            urlString = "wss://\(pcIP)"
+            print("🔗 Ngrok URL: \(urlString)")
+        } else {
+            urlString = "ws://\(pcIP):\(pcPort)"
+            print("🔗 Local URL: \(urlString)")
+        }
+        
+        guard let url = URL(string: urlString) else {
+            print("❌ Invalid URL: \(urlString)")
             return
         }
         
@@ -407,16 +418,16 @@ class PCServerConnection: ObservableObject {
 
 // MARK: - Colors Extension
 extension Color {
-    static let lupinAccent = Color(red: 0.85, green: 0.88, blue: 0.0) // #D8E000
-    static let lupinAccentHover = Color(red: 0.69, green: 0.72, blue: 0.0) // #B0B800
-    static let lupinBackground = Color(red: 0.04, green: 0.04, blue: 0.04) // #0a0a0a
-    static let lupinPanel = Color(red: 0.07, green: 0.07, blue: 0.07) // #111111
-    static let lupinBorder = Color(red: 0.10, green: 0.10, blue: 0.10) // #1a1a1a
-    static let lupinText = Color(red: 0.72, green: 0.72, blue: 0.72) // #B8B8B8
-    static let lupinTextDim = Color(red: 0.40, green: 0.40, blue: 0.40) // #666666
-    static let lupinRed = Color(red: 1.0, green: 0.27, blue: 0.27) // #FF4444
-    static let lupinGreen = Color(red: 0.27, green: 1.0, blue: 0.27) // #44FF44
-    static let lupinOrange = Color(red: 1.0, green: 0.53, blue: 0.0) // #FF8800
+    static let lupinAccent = Color(red: 0.85, green: 0.88, blue: 0.0)
+    static let lupinAccentHover = Color(red: 0.69, green: 0.72, blue: 0.0)
+    static let lupinBackground = Color(red: 0.04, green: 0.04, blue: 0.04)
+    static let lupinPanel = Color(red: 0.07, green: 0.07, blue: 0.07)
+    static let lupinBorder = Color(red: 0.10, green: 0.10, blue: 0.10)
+    static let lupinText = Color(red: 0.72, green: 0.72, blue: 0.72)
+    static let lupinTextDim = Color(red: 0.40, green: 0.40, blue: 0.40)
+    static let lupinRed = Color(red: 1.0, green: 0.27, blue: 0.27)
+    static let lupinGreen = Color(red: 0.27, green: 1.0, blue: 0.27)
+    static let lupinOrange = Color(red: 1.0, green: 0.53, blue: 0.0)
 }
 
 // MARK: - Custom Button Style
@@ -612,7 +623,6 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 16) {
-                // Header
                 HStack {
                     Spacer()
                     Text("LUPIN // SUITE")
@@ -633,11 +643,9 @@ struct ContentView: View {
                 )
                 .padding(.top, 10)
 
-                // Pixel Character
                 PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
                     .padding(.top, 4)
 
-                // PC Connection + Text Input Toggle
                 HStack(spacing: 12) {
                     Button(action: { showPCControls.toggle() }) {
                         HStack {
@@ -675,7 +683,6 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
 
-                // Text Input Field
                 if showTextInput {
                     HStack(spacing: 8) {
                         TextField("Введите команду...", text: $textInput)
@@ -707,7 +714,6 @@ struct ContentView: View {
                     .padding(.horizontal)
                 }
 
-                // Input Stream
                 SectionView(title: "ВХОДЯЩИЙ ПОТОК:") {
                     Text(assistant.recognizedText)
                         .font(.system(size: 15, design: .monospaced))
@@ -716,7 +722,6 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
 
-                // Microphone Access Denied
                 if assistant.micAccessDenied {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -728,7 +733,6 @@ struct ContentView: View {
                     .padding(.horizontal)
                 }
 
-                // Response
                 SectionView(title: "ОТВЕТ ЯДРА:") {
                     if assistant.isProcessing {
                         HStack {
@@ -752,7 +756,6 @@ struct ContentView: View {
 
                 Spacer()
 
-                // Microphone Button
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
@@ -826,7 +829,6 @@ struct PCControlView: View {
                 
                 ScrollView {
                     VStack(spacing: 12) {
-                        // Connection
                         SectionView(title: "CONNECTION") {
                             VStack(spacing: 8) {
                                 TextField("PC IP Address", text: $pcConnection.pcIP)
@@ -888,7 +890,6 @@ struct PCControlView: View {
                         }
                         
                         if pcConnection.isConnected {
-                            // System Info
                             SectionView(title: "SYSTEM INFO") {
                                 Text(pcConnection.systemInfo)
                                     .font(.system(size: 12, design: .monospaced))
@@ -901,7 +902,6 @@ struct PCControlView: View {
                                 .buttonStyle(LupinButtonStyle(isActive: true))
                             }
                             
-                            // Media Control
                             SectionView(title: "MEDIA CONTROL") {
                                 HStack(spacing: 20) {
                                     Button(action: { pcConnection.controlMedia("prev") }) {
@@ -965,7 +965,6 @@ struct PCControlView: View {
                                 }
                             }
                             
-                            // Tor Control
                             SectionView(title: "TOR CONTROL") {
                                 HStack(spacing: 8) {
                                     Button("CONNECT") {
@@ -985,7 +984,6 @@ struct PCControlView: View {
                                 }
                             }
                             
-                            // Volume
                             SectionView(title: "VOLUME: \(Int(volume))%") {
                                 Slider(value: $volume, in: 0...100) { editing in
                                     if !editing {
@@ -995,7 +993,6 @@ struct PCControlView: View {
                                 .tint(.lupinAccent)
                             }
                             
-                            // Screenshot
                             SectionView(title: "SCREENSHOT") {
                                 Button("TAKE SCREENSHOT") {
                                     pcConnection.takeScreenshot()
@@ -1011,7 +1008,6 @@ struct PCControlView: View {
                                 }
                             }
                             
-                            // Quick Launch
                             SectionView(title: "QUICK LAUNCH") {
                                 HStack(spacing: 8) {
                                     Button("CHROME") {
@@ -1036,7 +1032,6 @@ struct PCControlView: View {
                                 }
                             }
                             
-                            // Power Control
                             SectionView(title: "POWER CONTROL") {
                                 HStack(spacing: 8) {
                                     Button("LOCK") {
@@ -1159,16 +1154,16 @@ struct SettingsView: View {
                                 .disableAutocorrection(true)
                             
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Для подключения к ПК убедитесь, что:")
+                                Text("Для подключения к ПК:")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
-                                Text("• LUPIN SUITE запущен на ПК")
+                                Text("• Локально: IP + Port 8080")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
-                                Text("• Оба устройства в одной Wi-Fi сети")
+                                Text("• Через Ngrok: URL + Port 443")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
-                                Text("• Порт 8080 не заблокирован")
+                                Text("• Токен: lupin_secure_token_2024")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundColor(.lupinTextDim)
                             }
