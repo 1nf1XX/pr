@@ -3,164 +3,154 @@ import AVFoundation
 import Speech
 import UIKit
 
-// MARK: - Telegram Connection (URL Scheme Method)
-class TelegramConnection: ObservableObject {
+// MARK: - Telegram Bot Connection
+class TelegramBotConnection: ObservableObject {
     @Published var isConnected = true
     @Published var lastResponse = ""
+    @Published var botReply = "Ожидание ответа..."
     
-    private var botUsername = "lupin_suite_bot" // Замени на username своего бота
+    private var botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
+    private var chatId: Int64 = 7106785409
+    private var lastUpdateId: Int64 = 0
+    private var pollingTimer: Timer?
+    private var isPolling = false
     
-    // Отправка через URL Scheme (открывает Telegram с готовым текстом)
+    init() {
+        startPolling()
+    }
+    
+    // MARK: - Отправка команды
     func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
-        let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+        let urlString = "https://api.telegram.org/bot\(botToken)/sendMessage"
+        guard let url = URL(string: urlString) else { return }
         
-        // Пробуем открыть Telegram с текстом
-        let urlString = "tg://msg?text=\(encodedText)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        if let url = URL(string: urlString) {
+        let body: [String: Any] = [
+            "chat_id": chatId,
+            "text": text
+        ]
+        
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        print("📤 Sending: \(text)")
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
-                UIApplication.shared.open(url) { success in
-                    if success {
-                        self.lastResponse = "✅ Telegram открыт\nНажмите Отправить"
-                        completion?(true, "Отправьте сообщение в Telegram")
-                    } else {
-                        // Fallback на web
-                        let webURL = URL(string: "https://t.me/\(self.botUsername)")!
-                        UIApplication.shared.open(webURL)
-                        completion?(false, "Открыт web Telegram")
+                if let error = error {
+                    self?.lastResponse = "❌ \(error.localizedDescription)"
+                    completion?(false, self?.lastResponse ?? "")
+                    return
+                }
+                
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let ok = json["ok"] as? Bool, ok {
+                    self?.lastResponse = "✅ Отправлено"
+                    completion?(true, "✅ Отправлено")
+                } else {
+                    self?.lastResponse = "❌ Ошибка API"
+                    completion?(false, "❌ Ошибка")
+                }
+            }
+        }.resume()
+    }
+    
+    // MARK: - Polling ответов
+    func startPolling() {
+        guard !isPolling else { return }
+        isPolling = true
+        
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.checkUpdates()
+        }
+    }
+    
+    func stopPolling() {
+        isPolling = false
+        pollingTimer?.invalidate()
+        pollingTimer = nil
+    }
+    
+    private func checkUpdates() {
+        let urlString = "https://api.telegram.org/bot\(botToken)/getUpdates?offset=\(lastUpdateId + 1)&timeout=5"
+        guard let url = URL(string: urlString) else { return }
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            guard let self = self,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let result = json["result"] as? [[String: Any]] else {
+                return
+            }
+            
+            for update in result {
+                if let updateId = update["update_id"] as? Int64 {
+                    self.lastUpdateId = updateId
+                }
+                
+                if let message = update["message"] as? [String: Any],
+                   let text = message["text"] as? String {
+                    DispatchQueue.main.async {
+                        print("📥 Bot reply: \(text)")
+                        self.botReply = text
                     }
                 }
             }
-        }
+        }.resume()
     }
     
     // MARK: - Все команды
-    func sendVoiceCommand(_ text: String) {
-        sendCommand(text)
-    }
-    
-    func sendTextMessage(_ text: String) {
-        sendCommand(text)
-    }
-    
-    func requestSystemInfo() {
-        sendCommand("инфо")
-    }
-    
-    func getProcessList() {
-        sendCommand("процессы")
-    }
+    func sendVoiceCommand(_ text: String) { sendCommand(text) }
+    func sendTextMessage(_ text: String) { sendCommand(text) }
+    func requestSystemInfo() { sendCommand("инфо") }
+    func getProcessList() { sendCommand("процессы") }
     
     func controlMedia(_ action: String) {
-        let commands = [
-            "prev": "предыдущий трек",
-            "toggle": "пауза",
-            "next": "следующий трек"
-        ]
-        if let command = commands[action] {
-            sendCommand(command)
-        }
+        let commands = ["prev": "предыдущий трек", "toggle": "пауза", "next": "следующий трек"]
+        if let cmd = commands[action] { sendCommand(cmd) }
     }
     
-    func searchMusic(_ query: String) {
-        sendCommand("включи \(query)")
-    }
+    func searchMusic(_ query: String) { sendCommand("включи \(query)") }
     
     func controlTor(_ action: String) {
-        let commands = [
-            "connect": "включи тор",
-            "disconnect": "выключи тор",
-            "new_identity": "новая личность"
-        ]
-        if let command = commands[action] {
-            sendCommand(command)
-        }
+        let commands = ["connect": "включи тор", "disconnect": "выключи тор"]
+        if let cmd = commands[action] { sendCommand(cmd) }
     }
     
-    func takeScreenshot() {
-        sendCommand("скриншот")
-    }
-    
-    func controlVolume(_ volume: Int) {
-        sendCommand("громкость \(volume)")
-    }
+    func takeScreenshot() { sendCommand("скриншот") }
+    func controlVolume(_ volume: Int) { sendCommand("громкость \(volume)") }
     
     func launchApp(_ app: String) {
         let commands = [
-            "chrome": "открой хром",
-            "notepad": "открой блокнот",
-            "explorer": "открой проводник",
-            "cmd": "открой командную строку",
-            "calculator": "открой калькулятор",
-            "paint": "открой paint",
-            "word": "открой word",
-            "excel": "открой excel",
-            "steam": "открой steam",
-            "discord": "открой discord",
-            "taskmanager": "открой диспетчер"
+            "chrome": "открой хром", "notepad": "открой блокнот",
+            "explorer": "открой проводник", "cmd": "открой cmd",
+            "calculator": "открой калькулятор", "paint": "открой paint"
         ]
-        if let command = commands[app] {
-            sendCommand(command)
-        }
+        if let cmd = commands[app] { sendCommand(cmd) }
     }
     
     func powerControl(_ action: String) {
         let commands = [
-            "lock": "заблокируй пк",
-            "sleep": "спящий режим",
-            "reboot": "перезагрузи пк",
-            "shutdown": "выключи пк"
+            "lock": "заблокируй пк", "sleep": "спящий режим",
+            "reboot": "перезагрузи пк", "shutdown": "выключи пк"
         ]
-        if let command = commands[action] {
-            sendCommand(command)
-        }
+        if let cmd = commands[action] { sendCommand(cmd) }
     }
     
     func switchAudioDevice(_ device: String) {
-        let commands = [
-            "speaker": "на колонку",
-            "headphones": "на наушники"
-        ]
-        if let command = commands[device] {
-            sendCommand(command)
-        }
+        let commands = ["speaker": "на колонку", "headphones": "на наушники"]
+        if let cmd = commands[device] { sendCommand(cmd) }
     }
     
-    func getWifiPasswords() {
-        sendCommand("wifi пароли")
-    }
-    
-    func generatePassword() {
-        sendCommand("пароль")
-    }
-    
-    func getIP() {
-        sendCommand("ip адрес")
-    }
-    
-    func getTime() {
-        sendCommand("время")
-    }
-    
-    func clearTrash() {
-        sendCommand("очистить корзину")
-    }
-    
-    func clearClipboard() {
-        sendCommand("очистить буфер")
-    }
-    
-    func openURL(_ url: String) {
-        sendCommand("открой \(url)")
-    }
-    
-    func runCMD(_ command: String) {
-        sendCommand("команда \(command)")
-    }
-    
-    func killProcess(_ pid: Int) {
-        sendCommand("убить \(pid)")
-    }
+    func getWifiPasswords() { sendCommand("wifi пароли") }
+    func generatePassword() { sendCommand("пароль") }
+    func getIP() { sendCommand("ip адрес") }
+    func clearTrash() { sendCommand("очистить корзину") }
+    func clearClipboard() { sendCommand("очистить буфер") }
+    func speakOnPC(_ text: String) { sendCommand("скажи \(text)") }
 }
 
 // MARK: - Voice Assistant
@@ -172,14 +162,11 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private let audioEngine = AVAudioEngine()
 
     @Published var recognizedText = "Нажми на микрофон..."
-    @Published var assistantReply = "Система LUPIN на связи. Жду распоряжений."
     @Published var isListening = false
-    @Published var isProcessing = false
     @Published var isSpeaking = false
     @Published var micAccessDenied = false
 
-    @AppStorage("deepseek_api_key") var apiKey: String = ""
-    @Published var telegramConnection: TelegramConnection?
+    @Published var botConnection: TelegramBotConnection?
     
     override init() {
         super.init()
@@ -194,114 +181,19 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return AVSpeechSynthesisVoice(language: "ru-RU")
     }
 
-    private func configurePlaybackSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("Не удалось настроить сессию воспроизведения: \(error)")
-        }
-    }
-
     func speak(_ text: String) {
-        configurePlaybackSession()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = pickVoice()
         utterance.rate = 0.46
         utterance.pitchMultiplier = 0.78
-        utterance.postUtteranceDelay = 0.05
         synthesizer.speak(utterance)
     }
 
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.isSpeaking = true }
-    }
-
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.isSpeaking = false }
-    }
-
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.isSpeaking = false }
-    }
-
-    func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
-        if sendToPC, let tgConnection = telegramConnection {
-            tgConnection.sendVoiceCommand(prompt)
-            DispatchQueue.main.async {
-                self.assistantReply = "Команда: \(prompt)\nОткрыт Telegram - нажмите Отправить"
-                self.speak("Команда отправлена в Telegram")
-            }
-            return
+    func sendVoiceToPC(_ text: String) {
+        if let bot = botConnection {
+            bot.sendVoiceCommand(text)
+            speak("Команда отправлена")
         }
-        
-        guard !apiKey.isEmpty else {
-            DispatchQueue.main.async {
-                self.assistantReply = "Ключ не задан. Открой настройки."
-                self.speak(self.assistantReply)
-            }
-            return
-        }
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        guard let url = URL(string: "https://api.deepseek.com/chat/completions") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let systemPrompt = """
-        Тебя зовут LUPIN — ИИ-ассистент. Стиль общения: сдержанный, точный, слегка ироничный, \
-        как у безупречного личного помощника. Отвечай по делу, кратко, без грубости и без \
-        наигранной дерзости. Лёгкий налёт элегантности и остроумия уместен, хамство — нет.
-        """
-
-        let requestBody: [String: Any] = [
-            "model": "deepseek-chat",
-            "messages": [
-                ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": prompt]
-            ],
-            "stream": false
-        ]
-
-        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
-
-        DispatchQueue.main.async { self.isProcessing = true }
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            DispatchQueue.main.async { self.isProcessing = false }
-
-            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-                DispatchQueue.main.async {
-                    self.assistantReply = "Ошибка сервера: код \(httpResponse.statusCode)"
-                }
-                return
-            }
-
-            guard let data = data, error == nil else {
-                DispatchQueue.main.async {
-                    self.assistantReply = "Сетевая ошибка соединения с ядром."
-                }
-                return
-            }
-
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let choices = json["choices"] as? [[String: Any]],
-               let message = choices.first?["message"] as? [String: Any],
-               let content = message["content"] as? String {
-
-                DispatchQueue.main.async {
-                    self.assistantReply = content
-                    self.speak(content)
-                }
-            } else {
-                DispatchQueue.main.async {
-                    self.assistantReply = "Ошибка парсинга ответа API."
-                }
-            }
-        }.resume()
     }
 
     func startListening() {
@@ -312,7 +204,7 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                     self.startRecording()
                 } else {
                     self.micAccessDenied = true
-                    self.recognizedText = "Доступ к микрофону заблокирован системой."
+                    self.recognizedText = "Доступ к микрофону заблокирован"
                 }
             }
         }
@@ -368,10 +260,9 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 }
 
-// MARK: - Colors Extension
+// MARK: - Colors
 extension Color {
     static let lupinAccent = Color(red: 0.85, green: 0.88, blue: 0.0)
-    static let lupinAccentHover = Color(red: 0.69, green: 0.72, blue: 0.0)
     static let lupinBackground = Color(red: 0.04, green: 0.04, blue: 0.04)
     static let lupinPanel = Color(red: 0.07, green: 0.07, blue: 0.07)
     static let lupinBorder = Color(red: 0.10, green: 0.10, blue: 0.10)
@@ -382,7 +273,7 @@ extension Color {
     static let lupinOrange = Color(red: 1.0, green: 0.53, blue: 0.0)
 }
 
-// MARK: - Custom Button Style
+// MARK: - Button Style
 struct LupinButtonStyle: ButtonStyle {
     var isActive: Bool = false
     var isDanger: Bool = false
@@ -390,63 +281,50 @@ struct LupinButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .bold, design: .monospaced))
-            .foregroundColor(foregroundColor(for: configuration))
+            .foregroundColor(isActive ? .black : (isDanger ? .lupinRed : .lupinText))
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(backgroundColor(for: configuration))
+            .background(isActive ? Color.lupinAccent : Color.lupinPanel)
             .cornerRadius(4)
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(borderColor, lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.lupinBorder, lineWidth: 1))
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
-    }
-    
-    private func foregroundColor(for configuration: Configuration) -> Color {
-        if isActive {
-            return .black
-        } else if isDanger {
-            return .lupinRed
-        } else {
-            return .lupinText
-        }
-    }
-    
-    private func backgroundColor(for configuration: Configuration) -> Color {
-        if configuration.isPressed {
-            return .lupinAccentHover
-        } else if isActive {
-            return .lupinAccent
-        } else if isDanger {
-            return Color(red: 0.10, green: 0.05, blue: 0.05)
-        } else {
-            return .lupinPanel
-        }
-    }
-    
-    private var borderColor: Color {
-        if isActive {
-            return .lupinAccent
-        } else if isDanger {
-            return Color(red: 0.24, green: 0.11, blue: 0.11)
-        } else {
-            return .lupinBorder
-        }
     }
 }
 
-// MARK: - Pixel Character
+// MARK: - Section
+struct SectionView<Content: View>: View {
+    let title: String
+    let content: Content
+    
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(.lupinAccent)
+            content
+        }
+        .padding(12)
+        .background(Color.lupinPanel)
+        .cornerRadius(4)
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.lupinBorder, lineWidth: 1))
+    }
+}
+
+// MARK: - Pixel Face
 struct PixelLupinView: View {
     let isListening: Bool
     let isSpeaking: Bool
-
     @State private var mouthOpen = false
     @State private var bobUp = false
-
+    
     private let mouthTimer = Timer.publish(every: 0.22, on: .main, in: .common).autoconnect()
     private let bobTimer = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
-
+    
     private let baseGrid: [[Int]] = [
         [0,0,0,1,1,1,1,0,0,0],
         [0,1,1,1,1,1,1,1,1,0],
@@ -463,7 +341,7 @@ struct PixelLupinView: View {
         [4,4,3,3,3,3,3,3,4,4],
         [4,4,4,4,4,4,4,4,4,4]
     ]
-
+    
     private var currentGrid: [[Int]] {
         var grid = baseGrid
         if mouthOpen {
@@ -473,7 +351,7 @@ struct PixelLupinView: View {
         }
         return grid
     }
-
+    
     private func pixelColor(for value: Int) -> Color {
         switch value {
         case 1: return Color(red: 0.10, green: 0.10, blue: 0.10)
@@ -486,7 +364,7 @@ struct PixelLupinView: View {
         default: return .clear
         }
     }
-
+    
     var body: some View {
         GeometryReader { geo in
             let cols = baseGrid[0].count
@@ -494,7 +372,7 @@ struct PixelLupinView: View {
             let cell = min(geo.size.width / CGFloat(cols), geo.size.height / CGFloat(rows))
             let originX = (geo.size.width - CGFloat(cols) * cell) / 2
             let originY = (geo.size.height - CGFloat(rows) * cell) / 2
-
+            
             ZStack {
                 ForEach(0..<rows, id: \.self) { r in
                     ForEach(0..<cols, id: \.self) { c in
@@ -514,90 +392,36 @@ struct PixelLupinView: View {
         }
         .frame(width: 130, height: 175)
         .offset(y: bobUp ? -5 : 0)
-        .shadow(color: Color.lupinAccent.opacity((isListening || isSpeaking) ? 0.5 : 0.15), radius: (isListening || isSpeaking) ? 14 : 6)
+        .shadow(color: Color.lupinAccent.opacity((isListening || isSpeaking) ? 0.5 : 0.15), radius: 10)
         .onReceive(mouthTimer) { _ in
-            if isSpeaking {
-                mouthOpen.toggle()
-            } else if mouthOpen {
-                mouthOpen = false
-            }
+            if isSpeaking { mouthOpen.toggle() }
         }
         .onReceive(bobTimer) { _ in
-            let duration = (isListening || isSpeaking) ? 0.35 : 0.9
-            withAnimation(.easeInOut(duration: duration)) {
-                bobUp.toggle()
-            }
+            withAnimation(.easeInOut(duration: 0.6)) { bobUp.toggle() }
         }
-    }
-}
-
-// MARK: - Section View
-struct SectionView<Content: View>: View {
-    let title: String
-    let content: Content
-    
-    init(title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundColor(.lupinAccent)
-                .padding(.bottom, 2)
-            
-            content
-        }
-        .padding(12)
-        .background(Color.lupinPanel)
-        .cornerRadius(4)
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Color.lupinBorder, lineWidth: 1)
-        )
     }
 }
 
 // MARK: - Main Content View
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
-    @StateObject var telegramConnection = TelegramConnection()
-    @State private var showSettings = false
+    @StateObject var botConnection = TelegramBotConnection()
     @State private var showPCControls = false
     @State private var textInput = ""
     @State private var showTextInput = false
-
+    
     var body: some View {
         ZStack {
-            Color.lupinBackground
-                .ignoresSafeArea()
-
+            Color.lupinBackground.ignoresSafeArea()
+            
             VStack(spacing: 16) {
-                HStack {
-                    Spacer()
-                    Text("LUPIN // SUITE")
-                        .font(.system(size: 22, weight: .bold, design: .monospaced))
-                        .foregroundColor(.lupinAccent)
-                    Spacer()
-                }
-                .overlay(
-                    HStack {
-                        Spacer()
-                        Button(action: { showSettings = true }) {
-                            Image(systemName: "gearshape.fill")
-                                .font(.system(size: 18))
-                                .foregroundColor(.lupinTextDim)
-                        }
-                        .padding(.trailing)
-                    }
-                )
-                .padding(.top, 10)
-
+                Text("LUPIN // SUITE")
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .foregroundColor(.lupinAccent)
+                    .padding(.top, 10)
+                
                 PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
-                    .padding(.top, 4)
-
+                
                 HStack(spacing: 12) {
                     Button(action: { showPCControls.toggle() }) {
                         HStack {
@@ -612,29 +436,21 @@ struct ContentView: View {
                         .padding(.vertical, 8)
                         .background(Color.lupinPanel)
                         .cornerRadius(4)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.lupinBorder, lineWidth: 1)
-                        )
                     }
                     
                     Spacer()
                     
                     Button(action: { showTextInput.toggle() }) {
-                        Image(systemName: showTextInput ? "keyboard.chevron.compact.down" : "keyboard")
+                        Image(systemName: "keyboard")
                             .font(.system(size: 16))
                             .foregroundColor(.lupinAccent)
                             .padding(8)
                             .background(Color.lupinPanel)
                             .cornerRadius(4)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(Color.lupinBorder, lineWidth: 1)
-                            )
                     }
                 }
                 .padding(.horizontal)
-
+                
                 if showTextInput {
                     HStack(spacing: 8) {
                         TextField("Введите команду...", text: $textInput)
@@ -644,16 +460,7 @@ struct ContentView: View {
                             .padding(10)
                             .background(Color.lupinPanel)
                             .cornerRadius(4)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(Color.lupinBorder, lineWidth: 1)
-                            )
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-                            .submitLabel(.send)
-                            .onSubmit {
-                                sendTextCommand()
-                            }
+                            .onSubmit { sendTextCommand() }
                         
                         Button(action: sendTextCommand) {
                             Image(systemName: "paperplane.fill")
@@ -665,53 +472,31 @@ struct ContentView: View {
                     }
                     .padding(.horizontal)
                 }
-
+                
                 SectionView(title: "ВХОДЯЩИЙ ПОТОК:") {
                     Text(assistant.recognizedText)
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundColor(.white)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal)
-
-                if assistant.micAccessDenied {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.lupinRed)
-                        Text("Микрофон заблокирован. Разреши доступ в Настройках iOS.")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.lupinRed)
+                
+                SectionView(title: "ОТВЕТ БОТА:") {
+                    ScrollView {
+                        Text(botConnection.botReply)
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(.lupinAccent)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.horizontal)
-                }
-
-                SectionView(title: "ОТВЕТ ЯДРА:") {
-                    if assistant.isProcessing {
-                        HStack {
-                            ProgressView()
-                                .tint(.lupinAccent)
-                            Text("ОБРАБОТКА...")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.lupinOrange)
-                        }
-                    } else {
-                        ScrollView {
-                            Text(assistant.assistantReply)
-                                .font(.system(size: 15, design: .monospaced))
-                                .foregroundColor(.lupinAccent)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxHeight: 150)
-                    }
+                    .frame(maxHeight: 120)
                 }
                 .padding(.horizontal)
-
+                
                 Spacer()
-
+                
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
-                        assistant.sendToDeepSeek(prompt: assistant.recognizedText, sendToPC: true)
+                        assistant.sendVoiceToPC(assistant.recognizedText)
                     } else {
                         assistant.startListening()
                     }
@@ -722,46 +507,36 @@ struct ContentView: View {
                         .padding(25)
                         .background(assistant.isListening ? Color.lupinRed : Color.lupinAccent)
                         .clipShape(Circle())
-                        .shadow(color: (assistant.isListening ? Color.lupinRed : Color.lupinAccent).opacity(0.5), radius: 10)
                 }
-
+                
                 Text(assistant.isListening ? "ИДЕТ ЗАПИСЬ..." : "НАЖМИ ДЛЯ ВВОДА")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundColor(.lupinTextDim)
                     .padding(.bottom, 20)
             }
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(apiKey: $assistant.apiKey, telegramConnection: telegramConnection)
-        }
         .sheet(isPresented: $showPCControls) {
-            PCControlView(telegramConnection: telegramConnection)
+            PCControlView(botConnection: botConnection)
         }
         .onAppear {
-            assistant.telegramConnection = telegramConnection
+            assistant.botConnection = botConnection
         }
     }
     
     private func sendTextCommand() {
         guard !textInput.isEmpty else { return }
-        
         let command = textInput
         textInput = ""
-        
-        telegramConnection.sendCommand(command) { success, response in
-            assistant.assistantReply = response
-        }
+        botConnection.sendCommand(command)
     }
 }
 
 // MARK: - PC Control View
 struct PCControlView: View {
-    @ObservedObject var telegramConnection: TelegramConnection
+    @ObservedObject var botConnection: TelegramBotConnection
     @Environment(\.dismiss) var dismiss
     @State private var volume: Double = 50
     @State private var musicQuery = ""
-    @State private var urlInput = ""
-    @State private var cmdInput = ""
     
     var body: some View {
         NavigationView {
@@ -770,57 +545,19 @@ struct PCControlView: View {
                 
                 ScrollView {
                     VStack(spacing: 12) {
-                        SectionView(title: "SYSTEM") {
-                            HStack(spacing: 8) {
-                                Button("INFO") {
-                                    telegramConnection.requestSystemInfo()
-                                }
-                                .buttonStyle(LupinButtonStyle(isActive: true))
-                                
-                                Button("PROCESSES") {
-                                    telegramConnection.getProcessList()
-                                }
-                                .buttonStyle(LupinButtonStyle())
-                                
-                                Button("SCREENSHOT") {
-                                    telegramConnection.takeScreenshot()
-                                }
-                                .buttonStyle(LupinButtonStyle(isActive: true))
-                            }
-                            
-                            HStack(spacing: 8) {
-                                Button("IP") {
-                                    telegramConnection.getIP()
-                                }
-                                .buttonStyle(LupinButtonStyle())
-                                
-                                Button("TIME") {
-                                    telegramConnection.getTime()
-                                }
-                                .buttonStyle(LupinButtonStyle())
-                                
-                                Button("PASSWORD") {
-                                    telegramConnection.generatePassword()
-                                }
-                                .buttonStyle(LupinButtonStyle())
-                            }
-                        }
-                        
                         SectionView(title: "MEDIA CONTROL") {
                             HStack(spacing: 20) {
-                                Button(action: { telegramConnection.controlMedia("prev") }) {
+                                Button(action: { botConnection.controlMedia("prev") }) {
                                     Image(systemName: "backward.fill")
-                                        .font(.system(size: 22))
                                         .foregroundColor(.lupinAccent)
                                         .frame(maxWidth: .infinity)
                                         .padding(10)
-                                        .background(Color.lupinBackground)
+                                        .background(Color.lupinPanel)
                                         .cornerRadius(4)
                                 }
                                 
-                                Button(action: { telegramConnection.controlMedia("toggle") }) {
+                                Button(action: { botConnection.controlMedia("toggle") }) {
                                     Image(systemName: "playpause.fill")
-                                        .font(.system(size: 22))
                                         .foregroundColor(.black)
                                         .frame(maxWidth: .infinity)
                                         .padding(10)
@@ -828,13 +565,12 @@ struct PCControlView: View {
                                         .cornerRadius(4)
                                 }
                                 
-                                Button(action: { telegramConnection.controlMedia("next") }) {
+                                Button(action: { botConnection.controlMedia("next") }) {
                                     Image(systemName: "forward.fill")
-                                        .font(.system(size: 22))
                                         .foregroundColor(.lupinAccent)
                                         .frame(maxWidth: .infinity)
                                         .padding(10)
-                                        .background(Color.lupinBackground)
+                                        .background(Color.lupinPanel)
                                         .cornerRadius(4)
                                 }
                             }
@@ -845,12 +581,12 @@ struct PCControlView: View {
                                     .font(.system(size: 13, design: .monospaced))
                                     .foregroundColor(.white)
                                     .padding(8)
-                                    .background(Color.lupinBackground)
+                                    .background(Color.lupinPanel)
                                     .cornerRadius(4)
                                 
                                 Button("SEARCH") {
                                     if !musicQuery.isEmpty {
-                                        telegramConnection.searchMusic(musicQuery)
+                                        botConnection.searchMusic(musicQuery)
                                     }
                                 }
                                 .buttonStyle(LupinButtonStyle(isActive: true))
@@ -860,116 +596,73 @@ struct PCControlView: View {
                         SectionView(title: "VOLUME: \(Int(volume))%") {
                             Slider(value: $volume, in: 0...100) { editing in
                                 if !editing {
-                                    telegramConnection.controlVolume(Int(volume))
+                                    botConnection.controlVolume(Int(volume))
                                 }
                             }
                             .tint(.lupinAccent)
                         }
                         
+                        SectionView(title: "SYSTEM") {
+                            HStack(spacing: 8) {
+                                Button("INFO") { botConnection.requestSystemInfo() }
+                                    .buttonStyle(LupinButtonStyle(isActive: true))
+                                Button("SCREENSHOT") { botConnection.takeScreenshot() }
+                                    .buttonStyle(LupinButtonStyle(isActive: true))
+                                Button("PROCESSES") { botConnection.getProcessList() }
+                                    .buttonStyle(LupinButtonStyle())
+                            }
+                        }
+                        
                         SectionView(title: "QUICK LAUNCH") {
                             HStack(spacing: 6) {
-                                Button("CHROME") { telegramConnection.launchApp("chrome") }
+                                Button("CHROME") { botConnection.launchApp("chrome") }
                                     .buttonStyle(LupinButtonStyle())
-                                Button("NOTEPAD") { telegramConnection.launchApp("notepad") }
+                                Button("NOTEPAD") { botConnection.launchApp("notepad") }
                                     .buttonStyle(LupinButtonStyle())
-                                Button("EXPLORER") { telegramConnection.launchApp("explorer") }
-                                    .buttonStyle(LupinButtonStyle())
-                            }
-                            
-                            HStack(spacing: 6) {
-                                Button("CMD") { telegramConnection.launchApp("cmd") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("CALC") { telegramConnection.launchApp("calculator") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("PAINT") { telegramConnection.launchApp("paint") }
+                                Button("CMD") { botConnection.launchApp("cmd") }
                                     .buttonStyle(LupinButtonStyle())
                             }
                             
                             HStack(spacing: 6) {
-                                Button("WORD") { telegramConnection.launchApp("word") }
+                                Button("EXPLORER") { botConnection.launchApp("explorer") }
                                     .buttonStyle(LupinButtonStyle())
-                                Button("STEAM") { telegramConnection.launchApp("steam") }
+                                Button("CALC") { botConnection.launchApp("calculator") }
                                     .buttonStyle(LupinButtonStyle())
-                                Button("DISCORD") { telegramConnection.launchApp("discord") }
+                                Button("PAINT") { botConnection.launchApp("paint") }
                                     .buttonStyle(LupinButtonStyle())
                             }
                         }
                         
-                        SectionView(title: "TOR CONTROL") {
+                        SectionView(title: "AUDIO DEVICE") {
                             HStack(spacing: 8) {
-                                Button("CONNECT") { telegramConnection.controlTor("connect") }
+                                Button("SPEAKER") { botConnection.switchAudioDevice("speaker") }
                                     .buttonStyle(LupinButtonStyle(isActive: true))
-                                
-                                Button("DISCONNECT") { telegramConnection.controlTor("disconnect") }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
-                                
-                                Button("NEW ID") { telegramConnection.controlTor("new_identity") }
+                                Button("HEADPHONES") { botConnection.switchAudioDevice("headphones") }
                                     .buttonStyle(LupinButtonStyle())
-                            }
-                        }
-                        
-                        SectionView(title: "POWER CONTROL") {
-                            HStack(spacing: 8) {
-                                Button("LOCK") { telegramConnection.powerControl("lock") }
-                                    .buttonStyle(LupinButtonStyle())
-                                
-                                Button("SLEEP") { telegramConnection.powerControl("sleep") }
-                                    .buttonStyle(LupinButtonStyle())
-                                
-                                Button("REBOOT") { telegramConnection.powerControl("reboot") }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
-                                
-                                Button("SHUTDOWN") { telegramConnection.powerControl("shutdown") }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
                             }
                         }
                         
                         SectionView(title: "NETWORK") {
                             HStack(spacing: 8) {
-                                Button("WIFI PASS") { telegramConnection.getWifiPasswords() }
+                                Button("WIFI PASS") { botConnection.getWifiPasswords() }
                                     .buttonStyle(LupinButtonStyle(isActive: true))
-                                
-                                Button("CLEAR TRASH") { telegramConnection.clearTrash() }
+                                Button("IP") { botConnection.getIP() }
                                     .buttonStyle(LupinButtonStyle())
-                                
-                                Button("CLEAR CLIP") { telegramConnection.clearClipboard() }
+                                Button("PASSWORD") { botConnection.generatePassword() }
                                     .buttonStyle(LupinButtonStyle())
                             }
                         }
                         
-                        SectionView(title: "URL / CMD") {
+                        SectionView(title: "POWER") {
                             HStack(spacing: 8) {
-                                TextField("URL...", text: $urlInput)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(8)
-                                    .background(Color.lupinBackground)
-                                    .cornerRadius(4)
-                                
-                                Button("OPEN") {
-                                    if !urlInput.isEmpty {
-                                        telegramConnection.openURL(urlInput)
-                                    }
-                                }
-                                .buttonStyle(LupinButtonStyle(isActive: true))
-                            }
-                            
-                            HStack(spacing: 8) {
-                                TextField("CMD command...", text: $cmdInput)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(8)
-                                    .background(Color.lupinBackground)
-                                    .cornerRadius(4)
-                                
-                                Button("RUN") {
-                                    if !cmdInput.isEmpty {
-                                        telegramConnection.runCMD(cmdInput)
-                                    }
-                                }
-                                .buttonStyle(LupinButtonStyle())
+                                Button("LOCK") { botConnection.powerControl("lock") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("SLEEP") { botConnection.powerControl("sleep") }
+                                    .buttonStyle(LupinButtonStyle())
+                                Button("REBOOT") { botConnection.powerControl("reboot") }
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
+                                Button("SHUTDOWN") { botConnection.powerControl("shutdown") }
+                                    .buttonStyle(LupinButtonStyle(isDanger: true))
                             }
                         }
                     }
@@ -981,7 +674,6 @@ struct PCControlView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("CLOSE") { dismiss() }
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
                         .foregroundColor(.lupinAccent)
                 }
             }
@@ -990,81 +682,7 @@ struct PCControlView: View {
     }
 }
 
-// MARK: - Settings View
-struct SettingsView: View {
-    @Binding var apiKey: String
-    @ObservedObject var telegramConnection: TelegramConnection
-    @Environment(\.dismiss) var dismiss
-    @State private var draftKey: String = ""
-
-    var body: some View {
-        NavigationView {
-            ZStack {
-                Color.lupinBackground.ignoresSafeArea()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        SectionView(title: "DEEPSEEK API KEY") {
-                            SecureField("sk-...", text: $draftKey)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundColor(.white)
-                                .padding(10)
-                                .background(Color.lupinBackground)
-                                .cornerRadius(4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.lupinBorder, lineWidth: 1)
-                                )
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                        }
-                        
-                        SectionView(title: "TELEGRAM") {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Метод: URL Scheme")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.lupinGreen)
-                                Text("Кнопки открывают Telegram с готовой командой")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.lupinTextDim)
-                            }
-                        }
-                        
-                        Button(action: {
-                            apiKey = draftKey
-                            dismiss()
-                        }) {
-                            Text("СОХРАНИТЬ")
-                                .font(.system(size: 14, weight: .bold, design: .monospaced))
-                                .foregroundColor(.black)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.lupinAccent)
-                                .cornerRadius(4)
-                        }
-                    }
-                    .padding()
-                }
-            }
-            .navigationTitle("НАСТРОЙКИ")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("ЗАКРЫТЬ") { dismiss() }
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundColor(.lupinAccent)
-                }
-            }
-        }
-        .onAppear {
-            draftKey = apiKey
-        }
-        .preferredColorScheme(.dark)
-    }
-}
-
-// MARK: - App Entry Point
+// MARK: - App Entry
 @main
 struct LupinApp: App {
     var body: some Scene {
