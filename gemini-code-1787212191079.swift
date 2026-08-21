@@ -1,4 +1,5 @@
-// LUPIN — единый файл (объединены: main app, история команд, макросы, локальные уведомления, Siri Shortcuts / App Intents)
+// LUPIN — единый файл (main app, история команд, макросы, локальные уведомления, Siri Shortcuts / App Intents)
+// v2.1 — исправлены: IntentDialog в App Intents, конфликт mic/озвучка, NLU-фильтр по словам, polling foreground/background, общий LupinConfig
 import SwiftUI
 import AVFoundation
 import Speech
@@ -14,8 +15,8 @@ class TelegramBotConnection: ObservableObject {
     @Published var lastResponse = ""
     @Published var botReply = "Ожидание ответа..."
     
-    private var botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
-    private var chatId: Int64 = 7106785409
+    private var botToken = LupinConfig.botToken
+    private var chatId = LupinConfig.chatId
     private var lastUpdateId: Int64 = 0
     private var pollingTimer: Timer?
     private var isPolling = false
@@ -25,6 +26,26 @@ class TelegramBotConnection: ObservableObject {
     weak var historyStore: CommandHistoryStore?
     
     init() {
+        startPolling()
+        // iOS всё равно замораживает Timer в фоне через пару минут — вместо того чтобы
+        // впустую крутить его там, останавливаем на уход в фон и сразу опрашиваем при
+        // возврате в приложение, чтобы ответ подтянулся без задержки в 2 секунды.
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
+                                                 name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
+                                                 name: UIApplication.willEnterForegroundNotification, object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func appDidEnterBackground() {
+        stopPolling()
+    }
+
+    @objc private func appWillEnterForeground() {
+        checkUpdates()
         startPolling()
     }
     
@@ -83,7 +104,7 @@ class TelegramBotConnection: ObservableObject {
         pollingTimer = nil
     }
     
-    private func checkUpdates() {
+    func checkUpdates() {
         let urlString = "https://api.telegram.org/bot\(botToken)/getUpdates?offset=\(lastUpdateId + 1)&timeout=5"
         guard let url = URL(string: urlString) else { return }
         
@@ -338,6 +359,10 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     private func startRecording() {
+        // Останавливаем озвучку, если ассистент ещё говорит — иначе микрофон
+        // запишет собственную речь синтезатора вместо голоса пользователя.
+        synthesizer.stopSpeaking(at: .immediate)
+
         if recognitionTask != nil {
             recognitionTask?.cancel()
             recognitionTask = nil
@@ -717,9 +742,19 @@ struct ContentView: View {
         textInput = ""
         
         // Проверяем: это команда для ПК или вопрос для ИИ?
-        let pcCommands = ["открой", "пауза", "следующ", "предыдущ", "громкость", "выключи", "перезагрузи", "заблокируй", "скриншот", "инфо", "процессы", "wifi", "пароль", "ip", "корзин", "буфер", "скажи", "включи"]
-        
-        let isPCCommand = pcCommands.contains { text.lowercased().contains($0) }
+        // Проверка по целым словам (а не по вхождению подстроки), чтобы "выключи" не находилось
+        // внутри случайного текста типа "как выключить автозапуск" — плюс явный вопросительный
+        // оборот в начале фразы всегда уходит в DeepSeek, даже если внутри есть ключевое слово.
+        let pcCommandPrefixes = ["открой", "пауза", "следующ", "предыдущ", "громкость", "выключи", "перезагрузи", "заблокируй", "скриншот", "инфо", "процессы", "wifi", "пароль", "ip", "корзин", "буфер", "скажи", "включи"]
+        let questionStarters = ["как", "что", "почему", "зачем", "можно", "подскажи", "объясни", "расскажи"]
+
+        let lowered = text.lowercased()
+        let words = lowered.split(separator: " ").map(String.init)
+
+        let looksLikeQuestion = words.first.map { questionStarters.contains($0) } ?? false
+        let isPCCommand = !looksLikeQuestion && words.contains { word in
+            pcCommandPrefixes.contains { word.hasPrefix($0) }
+        }
         
         if isPCCommand {
             botConnection.sendCommand(text)
@@ -1468,24 +1503,28 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
 // 3. Добавь в Info.plist / Target Capabilities ничего дополнительного не нужно —
 //    App Intents регистрируются автоматически через AppShortcutsProvider ниже.
 
+// MARK: - Shared config
+/// Единственное место, где живут токен и chat_id. И TelegramBotConnection (UI-процесс),
+/// и IntentBotBridge (Siri-интенты, отдельный процесс) читают отсюда — обновил тут,
+/// обновилось сразу везде.
+enum LupinConfig {
+    static let botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
+    static let chatId: Int64 = 7106785409
+}
+
 // MARK: - Bridge: минимальная обёртка для отправки команды из интента
 /// Интенты не имеют доступа к @StateObject-инстансам живого UI, поэтому здесь —
 /// собственный лёгкий клиент с той же логикой отправки, что и в TelegramBotConnection.
 enum IntentBotBridge {
-    // Дублирует значения из TelegramBotConnection. Если меняешь токен там — поменяй и здесь,
-    // либо вынеси оба в общий Constants.swift, чтобы не рассинхронизировались.
-    private static let botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
-    private static let chatId: Int64 = 7106785409
-
     static func send(_ text: String) async -> Bool {
-        let urlString = "https://api.telegram.org/bot\(botToken)/sendMessage"
+        let urlString = "https://api.telegram.org/bot\(LupinConfig.botToken)/sendMessage"
         guard let url = URL(string: urlString) else { return false }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "chat_id": chatId,
+            "chat_id": LupinConfig.chatId,
             "text": text
         ])
 
@@ -1537,7 +1576,7 @@ struct PowerControlIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let ok = await IntentBotBridge.send(action.command)
-        return .result(dialog: ok ? "Команда отправлена." : "Не удалось отправить команду — проверь соединение.")
+        return .result(dialog: IntentDialog(stringLiteral: ok ? "Команда отправлена." : "Не удалось отправить команду — проверь соединение."))
     }
 }
 
@@ -1548,7 +1587,7 @@ struct WakeLupinIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let ok = await IntentBotBridge.send("привет")
-        return .result(dialog: ok ? "Люпен на связи." : "Люпен не отвечает.")
+        return .result(dialog: IntentDialog(stringLiteral: ok ? "Люпен на связи." : "Люпен не отвечает."))
     }
 }
 
@@ -1585,7 +1624,7 @@ struct MediaControlIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let ok = await IntentBotBridge.send(action.command)
-        return .result(dialog: ok ? "Готово." : "Не удалось отправить команду.")
+        return .result(dialog: IntentDialog(stringLiteral: ok ? "Готово." : "Не удалось отправить команду."))
     }
 }
 
@@ -1596,7 +1635,7 @@ struct TakeScreenshotIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let ok = await IntentBotBridge.send("скриншот")
-        return .result(dialog: ok ? "Запрос на скриншот отправлен." : "Не удалось отправить запрос.")
+        return .result(dialog: IntentDialog(stringLiteral: ok ? "Запрос на скриншот отправлен." : "Не удалось отправить запрос."))
     }
 }
 
@@ -1614,7 +1653,7 @@ struct SendCustomCommandIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let ok = await IntentBotBridge.send(text)
-        return .result(dialog: ok ? "Отправлено: \(text)" : "Не удалось отправить команду.")
+        return .result(dialog: IntentDialog(stringLiteral: ok ? "Отправлено: \(text)" : "Не удалось отправить команду."))
     }
 }
 
