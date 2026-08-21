@@ -153,7 +153,7 @@ class TelegramBotConnection: ObservableObject {
     func speakOnPC(_ text: String) { sendCommand("скажи \(text)") }
 }
 
-// MARK: - Voice Assistant
+// MARK: - Voice Assistant с DeepSeek ИИ
 class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var synthesizer = AVSpeechSynthesizer()
     private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ru-RU"))
@@ -162,15 +162,24 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private let audioEngine = AVAudioEngine()
 
     @Published var recognizedText = "Нажми на микрофон..."
+    @Published var assistantReply = "Система LUPIN на связи. Жду распоряжений."
     @Published var isListening = false
+    @Published var isProcessing = false
     @Published var isSpeaking = false
     @Published var micAccessDenied = false
 
+    @AppStorage("deepseek_api_key") var apiKey: String = ""
     @Published var botConnection: TelegramBotConnection?
+    
+    private var chatHistory: [[String: String]] = []
     
     override init() {
         super.init()
         synthesizer.delegate = self
+        chatHistory.append([
+            "role": "system",
+            "content": "Тебя зовут LUPIN — ИИ-ассистент. Стиль общения: сдержанный, точный, слегка ироничный, как у безупречного личного помощника. Отвечай по делу, кратко, без грубости. Лёгкий налёт элегантности и остроумия уместен, хамство — нет."
+        ])
     }
 
     private func pickVoice() -> AVSpeechSynthesisVoice? {
@@ -181,21 +190,121 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return AVSpeechSynthesisVoice(language: "ru-RU")
     }
 
+    private func configurePlaybackSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("Audio session error: \(error)")
+        }
+    }
+
     func speak(_ text: String) {
+        configurePlaybackSession()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = pickVoice()
         utterance.rate = 0.46
         utterance.pitchMultiplier = 0.78
+        utterance.postUtteranceDelay = 0.05
         synthesizer.speak(utterance)
     }
 
-    func sendVoiceToPC(_ text: String) {
-        if let bot = botConnection {
-            bot.sendVoiceCommand(text)
-            speak("Команда отправлена")
-        }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.isSpeaking = true }
     }
 
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.isSpeaking = false }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { self.isSpeaking = false }
+    }
+
+    // MARK: - Отправка в DeepSeek
+    func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
+        // Если нужно отправить на ПК
+        if sendToPC, let bot = botConnection {
+            bot.sendVoiceCommand(prompt)
+            DispatchQueue.main.async {
+                self.assistantReply = "Команда отправлена на ПК: \(prompt)"
+                self.speak(self.assistantReply)
+            }
+            return
+        }
+        
+        // Иначе — DeepSeek
+        guard !apiKey.isEmpty else {
+            DispatchQueue.main.async {
+                self.assistantReply = "Ключ DeepSeek не задан. Открой настройки."
+                self.speak(self.assistantReply)
+            }
+            return
+        }
+        
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        guard let url = URL(string: "https://api.deepseek.com/chat/completions") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        // Добавляем сообщение в историю
+        chatHistory.append(["role": "user", "content": prompt])
+        
+        // Ограничиваем историю
+        if chatHistory.count > 11 {
+            chatHistory = [chatHistory[0]] + chatHistory.suffix(10)
+        }
+
+        let requestBody: [String: Any] = [
+            "model": "deepseek-chat",
+            "messages": chatHistory,
+            "stream": false
+        ]
+
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+
+        DispatchQueue.main.async { self.isProcessing = true }
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async { self.isProcessing = false }
+
+            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                DispatchQueue.main.async {
+                    self.assistantReply = "Ошибка сервера: код \(httpResponse.statusCode). Проверь ключ."
+                }
+                return
+            }
+
+            guard let data = data, error == nil else {
+                DispatchQueue.main.async {
+                    self.assistantReply = "Сетевая ошибка соединения."
+                }
+                return
+            }
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = json["choices"] as? [[String: Any]],
+               let message = choices.first?["message"] as? [String: Any],
+               let content = message["content"] as? String {
+
+                DispatchQueue.main.async {
+                    self.assistantReply = content
+                    self.chatHistory.append(["role": "assistant", "content": content])
+                    self.speak(content)
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.assistantReply = "Ошибка парсинга ответа API."
+                }
+            }
+        }.resume()
+    }
+
+    // MARK: - Голосовой ввод
     func startListening() {
         SFSpeechRecognizer.requestAuthorization { authStatus in
             DispatchQueue.main.async {
@@ -407,6 +516,7 @@ struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
     @StateObject var botConnection = TelegramBotConnection()
     @State private var showPCControls = false
+    @State private var showSettings = false
     @State private var textInput = ""
     @State private var showTextInput = false
     
@@ -415,10 +525,21 @@ struct ContentView: View {
             Color.lupinBackground.ignoresSafeArea()
             
             VStack(spacing: 16) {
-                Text("LUPIN // SUITE")
-                    .font(.system(size: 22, weight: .bold, design: .monospaced))
-                    .foregroundColor(.lupinAccent)
-                    .padding(.top, 10)
+                HStack {
+                    Text("LUPIN // SUITE")
+                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .foregroundColor(.lupinAccent)
+                    
+                    Spacer()
+                    
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 18))
+                            .foregroundColor(.lupinTextDim)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.top, 10)
                 
                 PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
                 
@@ -453,7 +574,7 @@ struct ContentView: View {
                 
                 if showTextInput {
                     HStack(spacing: 8) {
-                        TextField("Введите команду...", text: $textInput)
+                        TextField("Вопрос или команда...", text: $textInput)
                             .textFieldStyle(PlainTextFieldStyle())
                             .font(.system(size: 14, design: .monospaced))
                             .foregroundColor(.white)
@@ -480,14 +601,35 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
                 
-                SectionView(title: "ОТВЕТ БОТА:") {
+                SectionView(title: "ОТВЕТ ИИ:") {
+                    if assistant.isProcessing {
+                        HStack {
+                            ProgressView()
+                                .tint(.lupinAccent)
+                            Text("ОБРАБОТКА...")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.lupinOrange)
+                        }
+                    } else {
+                        ScrollView {
+                            Text(assistant.assistantReply)
+                                .font(.system(size: 15, design: .monospaced))
+                                .foregroundColor(.lupinAccent)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 120)
+                    }
+                }
+                .padding(.horizontal)
+                
+                SectionView(title: "ОТВЕТ БОТА (ПК):") {
                     ScrollView {
                         Text(botConnection.botReply)
-                            .font(.system(size: 14, design: .monospaced))
-                            .foregroundColor(.lupinAccent)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.lupinGreen)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: 120)
+                    .frame(maxHeight: 80)
                 }
                 .padding(.horizontal)
                 
@@ -496,7 +638,8 @@ struct ContentView: View {
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
-                        assistant.sendVoiceToPC(assistant.recognizedText)
+                        // Отправляем голос в ИИ
+                        assistant.sendToDeepSeek(prompt: assistant.recognizedText)
                     } else {
                         assistant.startListening()
                     }
@@ -507,6 +650,7 @@ struct ContentView: View {
                         .padding(25)
                         .background(assistant.isListening ? Color.lupinRed : Color.lupinAccent)
                         .clipShape(Circle())
+                        .shadow(color: (assistant.isListening ? Color.lupinRed : Color.lupinAccent).opacity(0.5), radius: 10)
                 }
                 
                 Text(assistant.isListening ? "ИДЕТ ЗАПИСЬ..." : "НАЖМИ ДЛЯ ВВОДА")
@@ -518,16 +662,92 @@ struct ContentView: View {
         .sheet(isPresented: $showPCControls) {
             PCControlView(botConnection: botConnection)
         }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(apiKey: $assistant.apiKey)
+        }
         .onAppear {
             assistant.botConnection = botConnection
+            if assistant.apiKey.isEmpty {
+                showSettings = true
+            }
         }
     }
     
     private func sendTextCommand() {
         guard !textInput.isEmpty else { return }
-        let command = textInput
+        let text = textInput
         textInput = ""
-        botConnection.sendCommand(command)
+        
+        // Проверяем: это команда для ПК или вопрос для ИИ?
+        let pcCommands = ["открой", "пауза", "следующ", "предыдущ", "громкость", "выключи", "перезагрузи", "заблокируй", "скриншот", "инфо", "процессы", "wifi", "пароль", "ip", "корзин", "буфер", "скажи", "включи"]
+        
+        let isPCCommand = pcCommands.contains { text.lowercased().contains($0) }
+        
+        if isPCCommand {
+            botConnection.sendCommand(text)
+            assistant.assistantReply = "Команда отправлена на ПК: \(text)"
+        } else {
+            assistant.sendToDeepSeek(prompt: text)
+        }
+    }
+}
+
+// MARK: - Settings View
+struct SettingsView: View {
+    @Binding var apiKey: String
+    @Environment(\.dismiss) var dismiss
+    @State private var draftKey: String = ""
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.lupinBackground.ignoresSafeArea()
+                
+                VStack(spacing: 16) {
+                    SectionView(title: "DEEPSEEK API KEY") {
+                        SecureField("sk-...", text: $draftKey)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.white)
+                            .padding(10)
+                            .background(Color.lupinPanel)
+                            .cornerRadius(4)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                    }
+                    .padding(.horizontal)
+                    
+                    Button(action: {
+                        apiKey = draftKey
+                        dismiss()
+                    }) {
+                        Text("СОХРАНИТЬ")
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.lupinAccent)
+                            .cornerRadius(4)
+                    }
+                    .padding(.horizontal)
+                    
+                    Spacer()
+                }
+                .padding(.top, 20)
+            }
+            .navigationTitle("НАСТРОЙКИ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("ЗАКРЫТЬ") { dismiss() }
+                        .foregroundColor(.lupinAccent)
+                }
+            }
+        }
+        .onAppear {
+            draftKey = apiKey
+        }
+        .preferredColorScheme(.dark)
     }
 }
 
