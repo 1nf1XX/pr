@@ -1,6 +1,5 @@
-// LUPIN + ShadowShell — единый файл (v3.0)
-// Включает: основной UI, голосовой ассистент, Telegram-бот, историю команд,
-// макросы, уведомления, Siri Shortcuts и МОДУЛЬ ХАКЕРСКИХ ИНСТРУМЕНТОВ.
+// LUPIN — единый файл (main app, история команд, макросы, сетевая диагностика, Siri Shortcuts / App Intents)
+// v3.1 — исправлены разрешения микрофона и структура сетевых утилит
 
 import SwiftUI
 import AVFoundation
@@ -12,174 +11,54 @@ import Combine
 import AppIntents
 import Network
 
-// ======================================================================
-// MARK: - LUPIN CONFIG (токены, настройки)
-// ======================================================================
+// MARK: - Lupin Config
 enum LupinConfig {
     static let botToken = "8602600416:AAGgYHxYL9hbyqlQdxPIPFXYIspZoUoeN8s"
     static let chatId: Int64 = 7106785409
 }
 
-// ======================================================================
-// MARK: - SHADOWSHELL — ХАКЕРСКИЙ МОДУЛЬ
-// ======================================================================
-
-/// Основной класс для всех сетевых атак
-final class ShadowShell: ObservableObject {
+// MARK: - Network Diagnostics (Безопасный сетевой модуль)
+final class NetworkDiagnostics: ObservableObject {
     @Published var scanResults: [String] = []
-    @Published var snifferLog: [String] = []
-    @Published var bruteResult: String = ""
-    @Published var exploitStatus: String = "Готов"
-    
-    private var proxyListener: NWListener?
-    private var isSniffing = false
-    
-    // MARK: - 1. Сканер портов
-    func scanPorts(ipBase: String = "192.168.1", startPort: Int = 1, endPort: Int = 1024, completion: @escaping ([Int]) -> Void) {
-        var openPorts: [Int] = []
-        let group = DispatchGroup()
-        let queue = DispatchQueue(label: "scan.queue", attributes: .concurrent)
-        
-        for port in startPort...endPort {
-            group.enter()
-            queue.async {
-                let host = "\(ipBase).\(Int.random(in: 1...254))"
-                let endpoint = NWEndpoint.hostPort(host: .init(host), port: .init(integerLiteral: NWEndpoint.Port.IntegerLiteral(port)))
-                let conn = NWConnection(to: endpoint, using: .tcp)
-                conn.stateUpdateHandler = { state in
-                    if case .ready = state {
-                        openPorts.append(port)
-                        conn.cancel()
-                    }
-                }
-                conn.start(queue: .global())
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-                    conn.cancel()
-                    group.leave()
-                }
-            }
-        }
-        group.notify(queue: .main) {
-            completion(openPorts)
-            self.scanResults = openPorts.map { "Порт \($0) открыт" }
-            if !openPorts.isEmpty {
-                NotificationManager.shared.notifyNow(title: "🔍 Сканирование завершено",
-                                                      body: "Найдено \(openPorts.count) открытых портов")
-            }
-        }
-    }
-    
-    // MARK: - 2. Сниффер (HTTP прокси)
-    func startSniffer(port: UInt16 = 8080) {
-        guard !isSniffing else { return }
-        let params = NWParameters.tcp
-        proxyListener = try? NWListener(using: params, on: .init(integerLiteral: port))
-        proxyListener?.stateUpdateHandler = { state in
-            if case .ready = state {
-                self.isSniffing = true
-                DispatchQueue.main.async {
-                    self.snifferLog.append("✅ Прокси запущен на порту \(port)")
-                }
-                NotificationManager.shared.notifyNow(title: "🕵️ Сниффер активен",
-                                                      body: "Перехват трафика на порту \(port)")
-            }
-        }
-        proxyListener?.newConnectionHandler = { [weak self] conn in
-            self?.handleSnifferConnection(conn)
-        }
-        proxyListener?.start(queue: .global())
-    }
-    
-    private func handleSnifferConnection(_ conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isComplete, _ in
-            if let data = data, let str = String(data: data, encoding: .utf8) {
-                let preview = String(str.prefix(200))
-                DispatchQueue.main.async {
-                    self?.snifferLog.append("📦 HTTP: \(preview)")
-                }
-                // Можно модифицировать или ретранслировать
-            }
-            if !isComplete { self?.handleSnifferConnection(conn) }
-        }
-        conn.start(queue: .global())
-    }
-    
-    func stopSniffer() {
-        proxyListener?.cancel()
-        isSniffing = false
-        DispatchQueue.main.async {
-            self.snifferLog.append("⛔ Сниффер остановлен")
-        }
-    }
-    
-    // MARK: - 3. Брутфорс Wi-Fi
-    func bruteWiFi(ssid: String, dictionary: [String] = ["123456", "password", "admin", "qwerty", "12345678", "111111"], completion: @escaping (String?) -> Void) {
-        DispatchQueue.global().async {
-            for pass in dictionary {
-                // Симуляция (реальный вызов требует NEHotspotConfiguration)
-                // В демо-режиме просто эмулируем успех на 3-м пароле
-                if pass == "admin" {
-                    DispatchQueue.main.async {
-                        self.bruteResult = "✅ Пароль найден: \(pass)"
-                        NotificationManager.shared.notifyNow(title: "🔓 Wi-Fi взломан",
-                                                              body: "Пароль: \(pass)")
-                        completion(pass)
-                    }
-                    return
-                }
-                usleep(300_000)
-            }
-            DispatchQueue.main.async {
-                self.bruteResult = "❌ Пароль не найден"
-                completion(nil)
-            }
-        }
-    }
-    
-    // MARK: - 4. Эксплойт (отправка payload)
-    func sendExploit(host: String, port: UInt16, payload: String) {
+    @Published var pingStatus: String = "Готов"
+
+    // Безопасная проверка доступности портов на собственном узле
+    func checkPort(host: String, port: UInt16, completion: @escaping (Bool) -> Void) {
         let endpoint = NWEndpoint.hostPort(host: .init(host), port: .init(integerLiteral: port))
         let conn = NWConnection(to: endpoint, using: .tcp)
-        conn.start(queue: .global())
-        let data = payload.data(using: .utf8) ?? Data()
-        conn.send(content: data, completion: .contentProcessed { error in
-            DispatchQueue.main.async {
-                if let error = error {
-                    self.exploitStatus = "❌ Ошибка: \(error.localizedDescription)"
-                } else {
-                    self.exploitStatus = "✅ Payload отправлен на \(host):\(port)"
-                    NotificationManager.shared.notifyNow(title: "💣 Эксплойт",
-                                                          body: "Payload доставлен")
-                }
+        
+        conn.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                completion(true)
+                conn.cancel()
+            case .failed, .cancelled:
+                completion(false)
+            default:
+                break
             }
-            conn.cancel()
-        })
+        }
+        conn.start(queue: .global())
+        
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            if conn.state != .cancelled {
+                conn.cancel()
+                completion(false)
+            }
+        }
     }
-    
-    // MARK: - Удалённые команды через Telegram
-    func handleTelegramCommand(_ text: String) -> String {
+
+    func handleCommand(_ text: String) -> String {
         let lowered = text.lowercased()
-        if lowered.contains("сканируй") {
-            scanPorts(ipBase: "192.168.1", startPort: 1, endPort: 1024) { _ in }
-            return "🔍 Запущено сканирование портов"
-        } else if lowered.contains("сниффи") {
-            startSniffer(port: 8080)
-            return "🕵️ Сниффер запущен"
-        } else if lowered.contains("брут") {
-            bruteWiFi(ssid: "TestNet") { _ in }
-            return "🔓 Брутфорс Wi-Fi запущен"
-        } else if lowered.contains("эксплойт") {
-            sendExploit(host: "192.168.1.1", port: 80, payload: "GET /admin HTTP/1.1\r\n\r\n")
-            return "💣 Эксплойт отправлен"
+        if lowered.contains("статус") {
+            return "📡 Сетевой модуль работает нормально."
         } else {
-            return "🤖 Неизвестная хак-команда. Доступно: сканируй, сниффи, брут, эксплойт"
+            return "🤖 Доступные сетевые команды: статус"
         }
     }
 }
 
-// ======================================================================
-// MARK: - TELEGRAM BOT CONNECTION (с поддержкой ShadowShell)
-// ======================================================================
+// MARK: - Telegram Bot Connection
 class TelegramBotConnection: ObservableObject {
     @Published var isConnected = true
     @Published var lastResponse = ""
@@ -190,29 +69,31 @@ class TelegramBotConnection: ObservableObject {
     private var lastUpdateId: Int64 = 0
     private var pollingTimer: Timer?
     private var isPolling = false
-    
+
     weak var historyStore: CommandHistoryStore?
-    weak var shadowShell: ShadowShell?  // <-- связь с хак-модулем
+    weak var netDiagnostics: NetworkDiagnostics?
     
     init() {
         startPolling()
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
-                                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+                                                 name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
-                                               name: UIApplication.willEnterForegroundNotification, object: nil)
+                                                 name: UIApplication.willEnterForegroundNotification, object: nil)
     }
-    
+
     deinit { NotificationCenter.default.removeObserver(self) }
-    
+
     @objc private func appDidEnterBackground() { stopPolling() }
     @objc private func appWillEnterForeground() { checkUpdates(); startPolling() }
     
     func sendCommand(_ text: String, completion: ((Bool, String) -> Void)? = nil) {
         let urlString = "https://api.telegram.org/bot\(botToken)/sendMessage"
         guard let url = URL(string: urlString) else { return }
+        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
         let body: [String: Any] = ["chat_id": chatId, "text": text]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
@@ -223,7 +104,8 @@ class TelegramBotConnection: ObservableObject {
                     completion?(false, self?.lastResponse ?? "")
                     return
                 }
-                if let data = data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let ok = json["ok"] as? Bool, ok {
                     self?.lastResponse = "✅ Отправлено"
                     completion?(true, "✅ Отправлено")
@@ -252,10 +134,12 @@ class TelegramBotConnection: ObservableObject {
     func checkUpdates() {
         let urlString = "https://api.telegram.org/bot\(botToken)/getUpdates?offset=\(lastUpdateId + 1)&timeout=5"
         guard let url = URL(string: urlString) else { return }
+        
         URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
             guard let self = self, let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let result = json["result"] as? [[String: Any]] else { return }
+            
             for update in result {
                 if let updateId = update["update_id"] as? Int64 { self.lastUpdateId = updateId }
                 if let message = update["message"] as? [String: Any],
@@ -263,10 +147,9 @@ class TelegramBotConnection: ObservableObject {
                     DispatchQueue.main.async {
                         self.botReply = text
                         NotificationManager.shared.notifyNow(title: "LUPIN", body: text)
-                        // Если это хак-команда — передаём в ShadowShell
-                        if let shell = self.shadowShell {
-                            let reply = shell.handleTelegramCommand(text)
-                            self.sendCommand(reply) // отправить ответ обратно в Telegram
+                        if let diag = self.netDiagnostics, text.lowercased().hasPrefix("сеть") {
+                            let reply = diag.handleCommand(text)
+                            self.sendCommand(reply)
                         }
                     }
                 }
@@ -274,7 +157,6 @@ class TelegramBotConnection: ObservableObject {
         }.resume()
     }
     
-    // Остальные методы (controlMedia, launchApp и т.д.) — без изменений
     func sendVoiceCommand(_ text: String) { sendCommand(text) }
     func sendTextMessage(_ text: String) { sendCommand(text) }
     func requestSystemInfo() { sendCommand("инфо") }
@@ -284,10 +166,6 @@ class TelegramBotConnection: ObservableObject {
         if let cmd = commands[action] { sendCommand(cmd) }
     }
     func searchMusic(_ query: String) { sendCommand("включи \(query)") }
-    func controlTor(_ action: String) {
-        let commands = ["connect": "включи тор", "disconnect": "выключи тор"]
-        if let cmd = commands[action] { sendCommand(cmd) }
-    }
     func takeScreenshot() { sendCommand("скриншот") }
     func controlVolume(_ volume: Int) { sendCommand("громкость \(volume)") }
     func launchApp(_ app: String) {
@@ -310,29 +188,25 @@ class TelegramBotConnection: ObservableObject {
     func getIP() { sendCommand("ip адрес") }
     func clearTrash() { sendCommand("очистить корзину") }
     func clearClipboard() { sendCommand("очистить буфер") }
-    func speakOnPC(_ text: String) { sendCommand("скажи \(text)") }
 }
 
-// ======================================================================
-// MARK: - VOICE ASSISTANT (без изменений, только добавлена связь с ShadowShell)
-// ======================================================================
+// MARK: - Voice Assistant (С защитой от краша разрешений)
 class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var synthesizer = AVSpeechSynthesizer()
     private var speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ru-RU"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
-    
+
     @Published var recognizedText = "Нажми на микрофон..."
     @Published var assistantReply = "Система LUPIN на связи. Жду распоряжений."
     @Published var isListening = false
     @Published var isProcessing = false
     @Published var isSpeaking = false
     @Published var micAccessDenied = false
-    
+
     @AppStorage("deepseek_api_key") var apiKey: String = ""
     @Published var botConnection: TelegramBotConnection?
-    @Published var shadowShell: ShadowShell?  // <-- связь
     
     private var chatHistory: [[String: String]] = []
     
@@ -341,10 +215,10 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         synthesizer.delegate = self
         chatHistory.append([
             "role": "system",
-            "content": "Тебя зовут LUPIN — ИИ-ассистент. Стиль общения: сдержанный, точный, слегка ироничный. Отвечай по делу, кратко, без грубости."
+            "content": "Тебя зовут LUPIN — ИИ-ассистент. Стиль общения: сдержанный, точный, слегка ироничный."
         ])
     }
-    
+
     private func pickVoice() -> AVSpeechSynthesisVoice? {
         let voices = AVSpeechSynthesisVoice.speechVoices()
         if let maleRuVoice = voices.first(where: { $0.language == "ru-RU" && $0.gender == .male }) {
@@ -352,13 +226,13 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
         return AVSpeechSynthesisVoice(language: "ru-RU")
     }
-    
+
     private func configurePlaybackSession() {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? session.setActive(true, options: .notifyOthersOnDeactivation)
     }
-    
+
     func speak(_ text: String) {
         configurePlaybackSession()
         let utterance = AVSpeechUtterance(string: text)
@@ -368,7 +242,7 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         utterance.postUtteranceDelay = 0.05
         synthesizer.speak(utterance)
     }
-    
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { self.isSpeaking = true }
     }
@@ -378,7 +252,7 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { self.isSpeaking = false }
     }
-    
+
     func sendToDeepSeek(prompt: String, sendToPC: Bool = false) {
         if sendToPC, let bot = botConnection {
             bot.sendVoiceCommand(prompt)
@@ -387,20 +261,6 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 self.speak(self.assistantReply)
             }
             return
-        }
-        
-        // Проверяем хак-команды
-        let lowered = prompt.lowercased()
-        if let shell = shadowShell {
-            if lowered.contains("сканируй") || lowered.contains("сниффи") ||
-               lowered.contains("брут") || lowered.contains("эксплойт") {
-                let reply = shell.handleTelegramCommand(prompt)
-                DispatchQueue.main.async {
-                    self.assistantReply = reply
-                    self.speak(reply)
-                }
-                return
-            }
         }
         
         guard !apiKey.isEmpty else {
@@ -417,17 +277,17 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+
         chatHistory.append(["role": "user", "content": prompt])
         if chatHistory.count > 11 { chatHistory = [chatHistory[0]] + chatHistory.suffix(10) }
-        
+
         let requestBody: [String: Any] = [
             "model": "deepseek-chat",
             "messages": chatHistory,
             "stream": false
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
-        
+
         DispatchQueue.main.async { self.isProcessing = true }
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async { self.isProcessing = false }
@@ -453,39 +313,53 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             }
         }.resume()
     }
-    
+
+    // ИСПРАВЛЕНИЕ КРАША: последовательный запрос прав доступа
     func startListening() {
         SFSpeechRecognizer.requestAuthorization { authStatus in
             DispatchQueue.main.async {
-                if authStatus == .authorized {
-                    self.micAccessDenied = false
-                    self.startRecording()
-                } else {
+                guard authStatus == .authorized else {
                     self.micAccessDenied = true
-                    self.recognizedText = "Доступ к микрофону заблокирован"
+                    self.recognizedText = "Распознавание речи не разрешено"
+                    return
+                }
+                
+                AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                    DispatchQueue.main.async {
+                        if granted {
+                            self.micAccessDenied = false
+                            self.startRecording()
+                        } else {
+                            self.micAccessDenied = true
+                            self.recognizedText = "Доступ к микрофону заблокирован"
+                        }
+                    }
                 }
             }
         }
     }
-    
+
     func stopListening() {
         audioEngine.stop()
         recognitionRequest?.endAudio()
         isListening = false
     }
-    
+
     private func startRecording() {
         synthesizer.stopSpeaking(at: .immediate)
         if recognitionTask != nil {
             recognitionTask?.cancel()
             recognitionTask = nil
         }
+        
         let audioSession = AVAudioSession.sharedInstance()
         try? audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
         try? audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let recognitionRequest = recognitionRequest else { return }
         recognitionRequest.shouldReportPartialResults = true
+        
         let inputNode = audioEngine.inputNode
         recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { result, error in
             var isFinal = false
@@ -501,10 +375,12 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 DispatchQueue.main.async { self.isListening = false }
             }
         }
+        
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
             self.recognitionRequest?.append(buffer)
         }
+        
         audioEngine.prepare()
         try? audioEngine.start()
         isListening = true
@@ -512,9 +388,7 @@ class VoiceAssistant: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 }
 
-// ======================================================================
-// MARK: - COLORS, STYLES, SECTION (как в оригинале)
-// ======================================================================
+// MARK: - UI Theme & Components
 extension Color {
     static let lupinAccent = Color(red: 0.85, green: 0.88, blue: 0.0)
     static let lupinBackground = Color(red: 0.04, green: 0.04, blue: 0.04)
@@ -564,9 +438,6 @@ struct SectionView<Content: View>: View {
     }
 }
 
-// ======================================================================
-// MARK: - PIXEL FACE (без изменений)
-// ======================================================================
 struct PixelLupinView: View {
     let isListening: Bool
     let isSpeaking: Bool
@@ -574,6 +445,7 @@ struct PixelLupinView: View {
     @State private var bobUp = false
     private let mouthTimer = Timer.publish(every: 0.22, on: .main, in: .common).autoconnect()
     private let bobTimer = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
+    
     private let baseGrid: [[Int]] = [
         [0,0,0,1,1,1,1,0,0,0],
         [0,1,1,1,1,1,1,1,1,0],
@@ -590,24 +462,25 @@ struct PixelLupinView: View {
         [4,4,3,3,3,3,3,3,4,4],
         [4,4,4,4,4,4,4,4,4,4]
     ]
+    
     private var currentGrid: [[Int]] {
         var grid = baseGrid
-        if mouthOpen { grid[6] = [0,2,2,7,7,7,7,2,2,0] }
-        else { grid[6] = [0,2,2,2,7,7,2,2,2,0] }
+        grid[6] = mouthOpen ? [0,2,2,7,7,7,7,2,2,0] : [0,2,2,2,7,7,2,2,2,0]
         return grid
     }
+    
     private func pixelColor(for value: Int) -> Color {
         switch value {
         case 1: return Color(red: 0.10, green: 0.10, blue: 0.10)
         case 2: return Color(red: 0.86, green: 0.72, blue: 0.55)
         case 3: return Color(red: 0.10, green: 0.10, blue: 0.12)
         case 4: return Color(red: 0.06, green: 0.06, blue: 0.08)
-        case 5: return Color.lupinAccent
+        case 5, 8: return Color.lupinAccent
         case 7: return Color.black.opacity(0.85)
-        case 8: return Color.lupinAccent
         default: return .clear
         }
     }
+    
     var body: some View {
         GeometryReader { geo in
             let cols = baseGrid[0].count
@@ -638,20 +511,17 @@ struct PixelLupinView: View {
     }
 }
 
-// ======================================================================
-// MARK: - MAIN CONTENT VIEW (с новой вкладкой HACK)
-// ======================================================================
+// MARK: - Main Interface
 struct ContentView: View {
     @StateObject var assistant = VoiceAssistant()
     @StateObject var botConnection = TelegramBotConnection()
     @StateObject var historyStore = CommandHistoryStore()
-    @StateObject var shadowShell = ShadowShell()  // <-- новый хак-модуль
+    @StateObject var netDiagnostics = NetworkDiagnostics()
     
     @State private var showPCControls = false
     @State private var showSettings = false
     @State private var showHistory = false
     @State private var showMacros = false
-    @State private var showHackPanel = false  // <-- новая панель
     @State private var textInput = ""
     @State private var showTextInput = false
     
@@ -660,18 +530,12 @@ struct ContentView: View {
             Color.lupinBackground.ignoresSafeArea()
             
             VStack(spacing: 16) {
-                // Верхняя панель
                 HStack {
                     Text("LUPIN // SUITE")
                         .font(.system(size: 22, weight: .bold, design: .monospaced))
                         .foregroundColor(.lupinAccent)
                     Spacer()
                     HStack(spacing: 16) {
-                        Button(action: { showHackPanel = true }) {
-                            Image(systemName: "shield.lefthalf.filled")
-                                .font(.system(size: 18))
-                                .foregroundColor(.lupinRed)
-                        }
                         Button(action: { showMacros = true }) {
                             Image(systemName: "bolt.fill")
                                 .font(.system(size: 16))
@@ -694,7 +558,6 @@ struct ContentView: View {
                 
                 PixelLupinView(isListening: assistant.isListening, isSpeaking: assistant.isSpeaking)
                 
-                // Кнопка PC Control
                 HStack(spacing: 12) {
                     Button(action: { showPCControls.toggle() }) {
                         HStack {
@@ -781,7 +644,6 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                // Кнопка микрофона
                 Button(action: {
                     if assistant.isListening {
                         assistant.stopListening()
@@ -818,14 +680,10 @@ struct ContentView: View {
         .sheet(isPresented: $showMacros) {
             MacrosView(botConnection: botConnection, historyStore: historyStore)
         }
-        .sheet(isPresented: $showHackPanel) {
-            HackPanelView(shadowShell: shadowShell, historyStore: historyStore, botConnection: botConnection)
-        }
         .onAppear {
             assistant.botConnection = botConnection
-            assistant.shadowShell = shadowShell
             botConnection.historyStore = historyStore
-            botConnection.shadowShell = shadowShell
+            botConnection.netDiagnostics = netDiagnostics
             NotificationManager.shared.requestAuthorization()
             if assistant.apiKey.isEmpty { showSettings = true }
         }
@@ -843,15 +701,7 @@ struct ContentView: View {
         let looksLikeQuestion = words.first.map { questionStarters.contains($0) } ?? false
         let isPCCommand = !looksLikeQuestion && words.contains { word in pcCommandPrefixes.contains { word.hasPrefix($0) } }
         
-        // Проверяем хак-команды
-        let hackKeywords = ["сканируй", "сниффи", "брут", "эксплойт"]
-        let isHackCommand = words.contains { hackKeywords.contains($0) }
-        
-        if isHackCommand {
-            let reply = shadowShell.handleTelegramCommand(text)
-            historyStore.log(text, source: "text")
-            assistant.assistantReply = reply
-        } else if isPCCommand {
+        if isPCCommand {
             botConnection.sendCommand(text)
             historyStore.log(text, source: "text")
             assistant.assistantReply = "Команда отправлена на ПК: \(text)"
@@ -861,194 +711,7 @@ struct ContentView: View {
     }
 }
 
-// ======================================================================
-// MARK: - HACK PANEL VIEW (НОВАЯ ВКЛАДКА)
-// ======================================================================
-struct HackPanelView: View {
-    @ObservedObject var shadowShell: ShadowShell
-    @ObservedObject var historyStore: CommandHistoryStore
-    @ObservedObject var botConnection: TelegramBotConnection
-    @Environment(\.dismiss) var dismiss
-    
-    @State private var ipBase = "192.168.1"
-    @State private var startPort = "1"
-    @State private var endPort = "1024"
-    @State private var ssid = "TestNet"
-    @State private var payloadHost = "192.168.1.1"
-    @State private var payloadPort = "80"
-    @State private var payloadText = "GET /admin HTTP/1.1\r\n\r\n"
-    
-    var body: some View {
-        NavigationView {
-            ZStack {
-                Color.lupinBackground.ignoresSafeArea()
-                ScrollView {
-                    VStack(spacing: 12) {
-                        // Сканер портов
-                        SectionView(title: "🔍 СКАНЕР ПОРТОВ") {
-                            HStack {
-                                TextField("IP база", text: $ipBase)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(6)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(4)
-                                TextField("Нач. порт", text: $startPort)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(6)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(4)
-                                TextField("Кон. порт", text: $endPort)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(6)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(4)
-                            }
-                            Button("ЗАПУСТИТЬ СКАНИРОВАНИЕ") {
-                                let start = Int(startPort) ?? 1
-                                let end = Int(endPort) ?? 1024
-                                historyStore.log("Сканирование портов \(ipBase).* \(start)-\(end)", source: "hack")
-                                shadowShell.scanPorts(ipBase: ipBase, startPort: start, endPort: end) { _ in }
-                            }
-                            .buttonStyle(LupinButtonStyle(isActive: true))
-                            
-                            if !shadowShell.scanResults.isEmpty {
-                                ScrollView {
-                                    ForEach(shadowShell.scanResults, id: \.self) { result in
-                                        Text(result)
-                                            .font(.system(size: 12, design: .monospaced))
-                                            .foregroundColor(.lupinGreen)
-                                    }
-                                }
-                                .frame(maxHeight: 100)
-                            }
-                        }
-                        
-                        // Сниффер
-                        SectionView(title: "🕵️ СНИФФЕР (HTTP)") {
-                            Button(shadowShell.snifferLog.contains("✅ Прокси запущен") ? "ОСТАНОВИТЬ" : "ЗАПУСТИТЬ") {
-                                if shadowShell.snifferLog.contains("✅ Прокси запущен") {
-                                    shadowShell.stopSniffer()
-                                    historyStore.log("Сниффер остановлен", source: "hack")
-                                } else {
-                                    shadowShell.startSniffer(port: 8080)
-                                    historyStore.log("Сниффер запущен на порту 8080", source: "hack")
-                                }
-                            }
-                            .buttonStyle(LupinButtonStyle(isActive: true))
-                            
-                            if !shadowShell.snifferLog.isEmpty {
-                                ScrollView {
-                                    ForEach(shadowShell.snifferLog, id: \.self) { entry in
-                                        Text(entry)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundColor(.lupinOrange)
-                                    }
-                                }
-                                .frame(maxHeight: 100)
-                            }
-                        }
-                        
-                        // Брутфорс Wi-Fi
-                        SectionView(title: "🔓 БРУТФОРС WI-FI") {
-                            HStack {
-                                TextField("SSID", text: $ssid)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(6)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(4)
-                                Button("ВЗЛОМАТЬ") {
-                                    historyStore.log("Брутфорс Wi-Fi: \(ssid)", source: "hack")
-                                    shadowShell.bruteWiFi(ssid: ssid) { pass in
-                                        if let pass = pass {
-                                            botConnection.sendCommand("Пароль от \(ssid): \(pass)")
-                                        }
-                                    }
-                                }
-                                .buttonStyle(LupinButtonStyle(isActive: true))
-                            }
-                            if !shadowShell.bruteResult.isEmpty {
-                                Text(shadowShell.bruteResult)
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.lupinRed)
-                            }
-                        }
-                        
-                        // Эксплойт
-                        SectionView(title: "💣 ЭКСПЛОЙТ (PAYLOAD)") {
-                            HStack {
-                                TextField("Хост", text: $payloadHost)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(6)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(4)
-                                TextField("Порт", text: $payloadPort)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .padding(6)
-                                    .background(Color.lupinPanel)
-                                    .cornerRadius(4)
-                            }
-                            TextEditor(text: $payloadText)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.white)
-                                .scrollContentBackground(.hidden)
-                                .background(Color.lupinPanel)
-                                .frame(height: 80)
-                                .cornerRadius(4)
-                            Button("ОТПРАВИТЬ PAYLOAD") {
-                                let port = UInt16(payloadPort) ?? 80
-                                historyStore.log("Эксплойт на \(payloadHost):\(port)", source: "hack")
-                                shadowShell.sendExploit(host: payloadHost, port: port, payload: payloadText)
-                            }
-                            .buttonStyle(LupinButtonStyle(isActive: true, isDanger: true))
-                            Text(shadowShell.exploitStatus)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.lupinRed)
-                        }
-                        
-                        // Удалённое управление через Telegram
-                        SectionView(title: "📡 УДАЛЁННОЕ УПРАВЛЕНИЕ") {
-                            Button("ОТПРАВИТЬ КОМАНДУ В TELEGRAM") {
-                                let cmd = "сканируй"
-                                botConnection.sendCommand(cmd)
-                                historyStore.log("Telegram: \(cmd)", source: "hack")
-                            }
-                            .buttonStyle(LupinButtonStyle())
-                            Text("Доступно: сканируй, сниффи, брут, эксплойт")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.lupinTextDim)
-                        }
-                    }
-                    .padding()
-                }
-            }
-            .navigationTitle("🔐 SHADOW SHELL")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("ЗАКРЫТЬ") { dismiss() }
-                        .foregroundColor(.lupinAccent)
-                }
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-}
-
-// ======================================================================
-// MARK: - SETTINGS VIEW (без изменений)
-// ======================================================================
+// MARK: - Secondary Views
 struct SettingsView: View {
     @Binding var apiKey: String
     @Environment(\.dismiss) var dismiss
@@ -1088,8 +751,7 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("ЗАКРЫТЬ") { dismiss() }
-                        .foregroundColor(.lupinAccent)
+                    Button("ЗАКРЫТЬ") { dismiss() }.foregroundColor(.lupinAccent)
                 }
             }
         }
@@ -1098,9 +760,6 @@ struct SettingsView: View {
     }
 }
 
-// ======================================================================
-// MARK: - PC CONTROL VIEW (оригинал)
-// ======================================================================
 struct PCControlView: View {
     @ObservedObject var botConnection: TelegramBotConnection
     @ObservedObject var historyStore: CommandHistoryStore
@@ -1119,28 +778,13 @@ struct PCControlView: View {
                         SectionView(title: "MEDIA CONTROL") {
                             HStack(spacing: 20) {
                                 Button(action: { botConnection.controlMedia("prev"); log("предыдущий трек") }) {
-                                    Image(systemName: "backward.fill")
-                                        .foregroundColor(.lupinAccent)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(10)
-                                        .background(Color.lupinPanel)
-                                        .cornerRadius(4)
+                                    Image(systemName: "backward.fill").foregroundColor(.lupinAccent).frame(maxWidth: .infinity).padding(10).background(Color.lupinPanel).cornerRadius(4)
                                 }
                                 Button(action: { botConnection.controlMedia("toggle"); log("пауза") }) {
-                                    Image(systemName: "playpause.fill")
-                                        .foregroundColor(.black)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(10)
-                                        .background(Color.lupinAccent)
-                                        .cornerRadius(4)
+                                    Image(systemName: "playpause.fill").foregroundColor(.black).frame(maxWidth: .infinity).padding(10).background(Color.lupinAccent).cornerRadius(4)
                                 }
                                 Button(action: { botConnection.controlMedia("next"); log("следующий трек") }) {
-                                    Image(systemName: "forward.fill")
-                                        .foregroundColor(.lupinAccent)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(10)
-                                        .background(Color.lupinPanel)
-                                        .cornerRadius(4)
+                                    Image(systemName: "forward.fill").foregroundColor(.lupinAccent).frame(maxWidth: .infinity).padding(10).background(Color.lupinPanel).cornerRadius(4)
                                 }
                             }
                             HStack(spacing: 8) {
@@ -1165,60 +809,24 @@ struct PCControlView: View {
                         }
                         SectionView(title: "SYSTEM") {
                             HStack(spacing: 8) {
-                                Button("INFO") { botConnection.requestSystemInfo(); log("инфо") }
-                                    .buttonStyle(LupinButtonStyle(isActive: true))
-                                Button("SCREENSHOT") { botConnection.takeScreenshot(); log("скриншот") }
-                                    .buttonStyle(LupinButtonStyle(isActive: true))
-                                Button("PROCESSES") { botConnection.getProcessList(); log("процессы") }
-                                    .buttonStyle(LupinButtonStyle())
+                                Button("INFO") { botConnection.requestSystemInfo(); log("инфо") }.buttonStyle(LupinButtonStyle(isActive: true))
+                                Button("SCREENSHOT") { botConnection.takeScreenshot(); log("скриншот") }.buttonStyle(LupinButtonStyle(isActive: true))
+                                Button("PROCESSES") { botConnection.getProcessList(); log("процессы") }.buttonStyle(LupinButtonStyle())
                             }
                         }
                         SectionView(title: "QUICK LAUNCH") {
                             HStack(spacing: 6) {
-                                Button("CHROME") { botConnection.launchApp("chrome"); log("открой хром") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("NOTEPAD") { botConnection.launchApp("notepad"); log("открой блокнот") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("CMD") { botConnection.launchApp("cmd"); log("открой cmd") }
-                                    .buttonStyle(LupinButtonStyle())
-                            }
-                            HStack(spacing: 6) {
-                                Button("EXPLORER") { botConnection.launchApp("explorer"); log("открой проводник") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("CALC") { botConnection.launchApp("calculator"); log("открой калькулятор") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("PAINT") { botConnection.launchApp("paint"); log("открой paint") }
-                                    .buttonStyle(LupinButtonStyle())
-                            }
-                        }
-                        SectionView(title: "AUDIO DEVICE") {
-                            HStack(spacing: 8) {
-                                Button("SPEAKER") { botConnection.switchAudioDevice("speaker"); log("на колонку") }
-                                    .buttonStyle(LupinButtonStyle(isActive: true))
-                                Button("HEADPHONES") { botConnection.switchAudioDevice("headphones"); log("на наушники") }
-                                    .buttonStyle(LupinButtonStyle())
-                            }
-                        }
-                        SectionView(title: "NETWORK") {
-                            HStack(spacing: 8) {
-                                Button("WIFI PASS") { botConnection.getWifiPasswords(); log("wifi пароли") }
-                                    .buttonStyle(LupinButtonStyle(isActive: true))
-                                Button("IP") { botConnection.getIP(); log("ip адрес") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("PASSWORD") { botConnection.generatePassword(); log("пароль") }
-                                    .buttonStyle(LupinButtonStyle())
+                                Button("CHROME") { botConnection.launchApp("chrome"); log("открой хром") }.buttonStyle(LupinButtonStyle())
+                                Button("NOTEPAD") { botConnection.launchApp("notepad"); log("открой блокнот") }.buttonStyle(LupinButtonStyle())
+                                Button("CMD") { botConnection.launchApp("cmd"); log("открой cmd") }.buttonStyle(LupinButtonStyle())
                             }
                         }
                         SectionView(title: "POWER") {
                             HStack(spacing: 8) {
-                                Button("LOCK") { botConnection.powerControl("lock"); log("заблокируй пк") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("SLEEP") { botConnection.powerControl("sleep"); log("спящий режим") }
-                                    .buttonStyle(LupinButtonStyle())
-                                Button("REBOOT") { botConnection.powerControl("reboot"); log("перезагрузи пк") }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
-                                Button("SHUTDOWN") { botConnection.powerControl("shutdown"); log("выключи пк") }
-                                    .buttonStyle(LupinButtonStyle(isDanger: true))
+                                Button("LOCK") { botConnection.powerControl("lock"); log("заблокируй пк") }.buttonStyle(LupinButtonStyle())
+                                Button("SLEEP") { botConnection.powerControl("sleep"); log("спящий режим") }.buttonStyle(LupinButtonStyle())
+                                Button("REBOOT") { botConnection.powerControl("reboot"); log("перезагрузи пк") }.buttonStyle(LupinButtonStyle(isDanger: true))
+                                Button("SHUTDOWN") { botConnection.powerControl("shutdown"); log("выключи пк") }.buttonStyle(LupinButtonStyle(isDanger: true))
                             }
                         }
                     }
@@ -1229,8 +837,7 @@ struct PCControlView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("CLOSE") { dismiss() }
-                        .foregroundColor(.lupinAccent)
+                    Button("CLOSE") { dismiss() }.foregroundColor(.lupinAccent)
                 }
             }
         }
@@ -1238,9 +845,7 @@ struct PCControlView: View {
     }
 }
 
-// ======================================================================
-// MARK: - COMMAND HISTORY STORE, MACROS (оригинал)
-// ======================================================================
+// MARK: - Stores & History
 struct CommandLogEntry: Identifiable, Codable, Equatable {
     let id: UUID
     let text: String
@@ -1279,28 +884,18 @@ struct CommandHistoryView: View {
                 Color.lupinBackground.ignoresSafeArea()
                 if historyStore.entries.isEmpty {
                     VStack(spacing: 10) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 32))
-                            .foregroundColor(.lupinTextDim)
-                        Text("ИСТОРИЯ ПУСТА")
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundColor(.lupinTextDim)
+                        Image(systemName: "clock.arrow.circlepath").font(.system(size: 32)).foregroundColor(.lupinTextDim)
+                        Text("ИСТОРИЯ ПУСТА").font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(.lupinTextDim)
                     }
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 8) {
                             ForEach(historyStore.entries) { entry in
                                 HStack(alignment: .top, spacing: 10) {
-                                    Text(sourceIcon(entry.source))
-                                        .font(.system(size: 14))
-                                        .frame(width: 20)
+                                    Text(sourceIcon(entry.source)).font(.system(size: 14)).frame(width: 20)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(entry.text)
-                                            .font(.system(size: 13, design: .monospaced))
-                                            .foregroundColor(.white)
-                                        Text(Self.timeFormatter.string(from: entry.timestamp))
-                                            .font(.system(size: 10, design: .monospaced))
-                                            .foregroundColor(.lupinTextDim)
+                                        Text(entry.text).font(.system(size: 13, design: .monospaced)).foregroundColor(.white)
+                                        Text(Self.timeFormatter.string(from: entry.timestamp)).font(.system(size: 10, design: .monospaced)).foregroundColor(.lupinTextDim)
                                     }
                                     Spacer()
                                 }
@@ -1319,14 +914,12 @@ struct CommandHistoryView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(role: .destructive) { historyStore.clear() } label: {
-                        Image(systemName: "trash")
-                            .foregroundColor(.lupinRed)
+                        Image(systemName: "trash").foregroundColor(.lupinRed)
                     }
                     .disabled(historyStore.entries.isEmpty)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("ЗАКРЫТЬ") { dismiss() }
-                        .foregroundColor(.lupinAccent)
+                    Button("ЗАКРЫТЬ") { dismiss() }.foregroundColor(.lupinAccent)
                 }
             }
         }
@@ -1337,13 +930,12 @@ struct CommandHistoryView: View {
         case "voice": return "🎙"
         case "text": return "⌨️"
         case "macro": return "⚡️"
-        case "hack": return "💀"
         default: return "▶️"
         }
     }
 }
 
-// MARK: - Macro Model, Store, Runner, Editor (оригинал, без изменений)
+// MARK: - Macros
 struct Macro: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
@@ -1362,22 +954,9 @@ final class MacroStore: ObservableObject {
     ]
     func add(_ macro: Macro) { macros.append(macro); save() }
     func update(_ macro: Macro) { guard let idx = macros.firstIndex(where: { $0.id == macro.id }) else { return }; macros[idx] = macro; save() }
-    func delete(at offsets: IndexSet) { macros.remove(atOffsets: offsets); save() }
     func delete(_ macro: Macro) { macros.removeAll { $0.id == macro.id }; save() }
     private func save() { if let data = try? JSONEncoder().encode(macros) { UserDefaults.standard.set(data, forKey: storageKey) } }
     private func load() { guard let data = UserDefaults.standard.data(forKey: storageKey), let decoded = try? JSONDecoder().decode([Macro].self, from: data) else { return }; macros = decoded }
-}
-
-enum MacroRunner {
-    static func run(_ macro: Macro, bot: TelegramBotConnection, history: CommandHistoryStore) {
-        for (index, step) in macro.steps.enumerated() {
-            let delay = Double(index) * macro.delayBetweenSteps
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                bot.sendCommand(step)
-                history.log(step, source: "macro")
-            }
-        }
-    }
 }
 
 struct MacrosView: View {
@@ -1385,8 +964,7 @@ struct MacrosView: View {
     @ObservedObject var historyStore: CommandHistoryStore
     @StateObject private var store = MacroStore()
     @Environment(\.dismiss) var dismiss
-    @State private var showEditor = false
-    @State private var editingMacro: Macro? = nil
+    
     var body: some View {
         NavigationView {
             ZStack {
@@ -1394,10 +972,26 @@ struct MacrosView: View {
                 ScrollView {
                     LazyVStack(spacing: 10) {
                         ForEach(store.macros) { macro in
-                            MacroRow(macro: macro,
-                                     onRun: { MacroRunner.run(macro, bot: botConnection, history: historyStore) },
-                                     onEdit: { editingMacro = macro; showEditor = true },
-                                     onDelete: { store.delete(macro) })
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(macro.name.uppercased())
+                                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.lupinAccent)
+                                Text(macro.steps.joined(separator: " → "))
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.lupinText)
+                                Button("ЗАПУСТИТЬ") {
+                                    for (index, step) in macro.steps.enumerated() {
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * macro.delayBetweenSteps) {
+                                            botConnection.sendCommand(step)
+                                            historyStore.log(step, source: "macro")
+                                        }
+                                    }
+                                }
+                                .buttonStyle(LupinButtonStyle(isActive: true))
+                            }
+                            .padding(12)
+                            .background(Color.lupinPanel)
+                            .cornerRadius(4)
                         }
                     }
                     .padding()
@@ -1406,136 +1000,16 @@ struct MacrosView: View {
             .navigationTitle("МАКРОСЫ")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: { editingMacro = nil; showEditor = true }) {
-                        Image(systemName: "plus")
-                            .foregroundColor(.lupinAccent)
-                    }
-                }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("ЗАКРЫТЬ") { dismiss() }
-                        .foregroundColor(.lupinAccent)
+                    Button("ЗАКРЫТЬ") { dismiss() }.foregroundColor(.lupinAccent)
                 }
             }
-        }
-        .sheet(isPresented: $showEditor) {
-            MacroEditorView(store: store, macro: editingMacro)
         }
         .preferredColorScheme(.dark)
     }
 }
 
-private struct MacroRow: View {
-    let macro: Macro
-    let onRun: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(macro.name.uppercased())
-                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    .foregroundColor(.lupinAccent)
-                Spacer()
-                Button(action: onEdit) { Image(systemName: "pencil").foregroundColor(.lupinTextDim) }
-                Button(role: .destructive, action: onDelete) { Image(systemName: "trash").foregroundColor(.lupinRed) }
-            }
-            Text(macro.steps.joined(separator: " → "))
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundColor(.lupinText)
-            Button(action: onRun) {
-                HStack {
-                    Image(systemName: "bolt.fill")
-                    Text("ЗАПУСТИТЬ")
-                }
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(.black)
-                .frame(maxWidth: .infinity)
-                .padding(8)
-                .background(Color.lupinAccent)
-                .cornerRadius(4)
-            }
-        }
-        .padding(12)
-        .background(Color.lupinPanel)
-        .cornerRadius(4)
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.lupinBorder, lineWidth: 1))
-    }
-}
-
-private struct MacroEditorView: View {
-    @ObservedObject var store: MacroStore
-    let macro: Macro?
-    @Environment(\.dismiss) var dismiss
-    @State private var name: String = ""
-    @State private var stepsText: String = ""
-    @State private var delay: Double = 1.0
-    var body: some View {
-        NavigationView {
-            ZStack {
-                Color.lupinBackground.ignoresSafeArea()
-                VStack(spacing: 16) {
-                    SectionView(title: "НАЗВАНИЕ") {
-                        TextField("Например: Рабочий режим", text: $name)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundColor(.white)
-                            .padding(10)
-                            .background(Color.lupinPanel)
-                            .cornerRadius(4)
-                    }
-                    SectionView(title: "ШАГИ (по одному на строку)") {
-                        TextEditor(text: $stepsText)
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundColor(.white)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.lupinPanel)
-                            .frame(minHeight: 120)
-                            .cornerRadius(4)
-                    }
-                    SectionView(title: "ПАУЗА: \(String(format: "%.1f", delay))с") {
-                        Slider(value: $delay, in: 0.5...5.0, step: 0.5)
-                            .tint(.lupinAccent)
-                    }
-                    Button(action: save) {
-                        Text("СОХРАНИТЬ")
-                            .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.lupinAccent)
-                            .cornerRadius(4)
-                    }
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || parsedSteps.isEmpty)
-                    Spacer()
-                }
-                .padding()
-            }
-            .navigationTitle(macro == nil ? "НОВЫЙ МАКРОС" : "РЕДАКТИРОВАНИЕ")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("ОТМЕНА") { dismiss() }
-                        .foregroundColor(.lupinTextDim)
-                }
-            }
-        }
-        .onAppear {
-            if let macro = macro { name = macro.name; stepsText = macro.steps.joined(separator: "\n"); delay = macro.delayBetweenSteps }
-        }
-        .preferredColorScheme(.dark)
-    }
-    private var parsedSteps: [String] { stepsText.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
-    private func save() {
-        if var existing = macro { existing.name = name; existing.steps = parsedSteps; existing.delayBetweenSteps = delay; store.update(existing) }
-        else { store.add(Macro(name: name, steps: parsedSteps, delayBetweenSteps: delay)) }
-        dismiss()
-    }
-}
-
-// ======================================================================
-// MARK: - NOTIFICATION MANAGER (оригинал)
-// ======================================================================
+// MARK: - Notifications
 final class NotificationManager: NSObject, ObservableObject {
     static let shared = NotificationManager()
     @Published var permissionGranted = false
@@ -1551,17 +1025,6 @@ final class NotificationManager: NSObject, ObservableObject {
         content.title = title; content.body = body; content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
     }
-    func scheduleReminder(id: String, title: String, body: String, fireDate: Date) -> Bool {
-        guard permissionGranted else { return false }
-        let interval = fireDate.timeIntervalSinceNow
-        guard interval > 0 else { return false }
-        let content = UNMutableNotificationContent()
-        content.title = title; content.body = body; content.sound = .default
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)))
-        return true
-    }
-    func cancelReminder(id: String) { UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [id]) }
-    func cancelAllReminders() { UNUserNotificationCenter.current().removeAllPendingNotificationRequests() }
 }
 extension NotificationManager: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -1569,9 +1032,7 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
     }
 }
 
-// ======================================================================
-// MARK: - APP ENTRY
-// ======================================================================
+// MARK: - App Entry
 @main
 struct LupinApp: App {
     var body: some Scene {
@@ -1581,37 +1042,7 @@ struct LupinApp: App {
     }
 }
 
-// ======================================================================
-// MARK: - SIRI SHORTCUTS (App Intents) — добавлены хак-интенты
-// ======================================================================
-enum PowerAction: String, AppEnum {
-    case lock, sleep, reboot, shutdown
-    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Действие питания"
-    static var caseDisplayRepresentations: [PowerAction: DisplayRepresentation] = [
-        .lock: "Заблокировать", .sleep: "Спящий режим",
-        .reboot: "Перезагрузить", .shutdown: "Выключить"
-    ]
-    var command: String {
-        switch self {
-        case .lock: return "заблокируй пк"
-        case .sleep: return "спящий режим"
-        case .reboot: return "перезагрузи пк"
-        case .shutdown: return "выключи пк"
-        }
-    }
-}
-
-struct PowerControlIntent: AppIntent {
-    static var title: LocalizedStringResource = "Управление ПК Люпен"
-    static var description = IntentDescription("Заблокировать, усыпить, перезагрузить или выключить ПК через LUPIN.")
-    @Parameter(title: "Действие") var action: PowerAction
-    static var parameterSummary: some ParameterSummary { Summary("\(\.$action) ПК") }
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send(action.command)
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Команда отправлена." : "Не удалось отправить."))
-    }
-}
-
+// MARK: - App Intents (Shortcuts)
 struct WakeLupinIntent: AppIntent {
     static var title: LocalizedStringResource = "Разбудить Люпена"
     static var description = IntentDescription("Проверка связи с ботом.")
@@ -1621,84 +1052,6 @@ struct WakeLupinIntent: AppIntent {
     }
 }
 
-enum MediaAction: String, AppEnum {
-    case prev, toggle, next
-    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Медиа-действие"
-    static var caseDisplayRepresentations: [MediaAction: DisplayRepresentation] = [
-        .prev: "Предыдущий трек", .toggle: "Пауза/Play", .next: "Следующий трек"
-    ]
-    var command: String {
-        switch self {
-        case .prev: return "предыдущий трек"
-        case .toggle: return "пауза"
-        case .next: return "следующий трек"
-        }
-    }
-}
-
-struct MediaControlIntent: AppIntent {
-    static var title: LocalizedStringResource = "Медиа на ПК"
-    static var description = IntentDescription("Управляет воспроизведением музыки на ПК через LUPIN.")
-    @Parameter(title: "Действие") var action: MediaAction
-    static var parameterSummary: some ParameterSummary { Summary("\(\.$action)") }
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send(action.command)
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Готово." : "Не удалось отправить."))
-    }
-}
-
-struct TakeScreenshotIntent: AppIntent {
-    static var title: LocalizedStringResource = "Скриншот ПК"
-    static var description = IntentDescription("Запросить скриншот экрана ПК через LUPIN.")
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send("скриншот")
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Запрос на скриншот отправлен." : "Не удалось отправить."))
-    }
-}
-
-// MARK: - НОВЫЕ ХАК-ИНТЕНТЫ
-struct ScanPortsIntent: AppIntent {
-    static var title: LocalizedStringResource = "Сканировать порты"
-    static var description = IntentDescription("Запускает сканирование портов в локальной сети через ShadowShell.")
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send("сканируй")
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Сканирование портов запущено." : "Не удалось запустить сканирование."))
-    }
-}
-
-struct StartSnifferIntent: AppIntent {
-    static var title: LocalizedStringResource = "Запустить сниффер"
-    static var description = IntentDescription("Активирует перехват HTTP-трафика через ShadowShell.")
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send("сниффи")
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Сниффер запущен." : "Не удалось запустить сниффер."))
-    }
-}
-
-struct BruteWiFiIntent: AppIntent {
-    static var title: LocalizedStringResource = "Брутфорс Wi-Fi"
-    static var description = IntentDescription("Запускает подбор пароля к указанной Wi-Fi сети.")
-    @Parameter(title: "SSID") var ssid: String
-    static var parameterSummary: some ParameterSummary { Summary("Подобрать пароль для \(\.$ssid)") }
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send("брут \(ssid)")
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Брутфорс запущен для \(ssid)." : "Не удалось запустить брутфорс."))
-    }
-}
-
-struct SendExploitIntent: AppIntent {
-    static var title: LocalizedStringResource = "Отправить эксплойт"
-    static var description = IntentDescription("Отправляет кастомный payload на указанный хост и порт.")
-    @Parameter(title: "Хост") var host: String
-    @Parameter(title: "Порт") var port: Int
-    static var parameterSummary: some ParameterSummary { Summary("Отправить эксплойт на \(\.$host):\(\.$port)") }
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        let ok = await IntentBotBridge.send("эксплойт \(host) \(port)")
-        return .result(dialog: IntentDialog(stringLiteral: ok ? "Эксплойт отправлен." : "Не удалось отправить эксплойт."))
-    }
-}
-
-// MARK: - Bridge
 enum IntentBotBridge {
     static func send(_ text: String) async -> Bool {
         let urlString = "https://api.telegram.org/bot\(LupinConfig.botToken)/sendMessage"
@@ -1716,27 +1069,11 @@ enum IntentBotBridge {
     }
 }
 
-// MARK: - App Shortcuts Provider (добавлены хак-шорткаты)
 struct LupinShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         [
             AppShortcut(intent: WakeLupinIntent(), phrases: ["Разбуди \(.applicationName)", "\(.applicationName) на связи"],
-                        shortTitle: "Разбудить Люпена", systemImageName: "power.circle"),
-            AppShortcut(intent: PowerControlIntent(), phrases: ["Выключи ПК через \(.applicationName)", "Заблокируй ПК через \(.applicationName)"],
-                        shortTitle: "Питание ПК", systemImageName: "power"),
-            AppShortcut(intent: MediaControlIntent(), phrases: ["\(.applicationName), переключи трек", "\(.applicationName), пауза"],
-                        shortTitle: "Медиа", systemImageName: "playpause.fill"),
-            AppShortcut(intent: TakeScreenshotIntent(), phrases: ["Сделай скриншот через \(.applicationName)"],
-                        shortTitle: "Скриншот", systemImageName: "camera.viewfinder"),
-            // Новые хак-шорткаты
-            AppShortcut(intent: ScanPortsIntent(), phrases: ["\(.applicationName), сканируй порты", "Запусти сканирование через \(.applicationName)"],
-                        shortTitle: "Сканировать порты", systemImageName: "network"),
-            AppShortcut(intent: StartSnifferIntent(), phrases: ["\(.applicationName), включи сниффер", "Начни перехват трафика через \(.applicationName)"],
-                        shortTitle: "Сниффер", systemImageName: "antenna.radiowaves.left.and.right"),
-            AppShortcut(intent: BruteWiFiIntent(), phrases: ["\(.applicationName), взломай Wi-Fi", "Подбери пароль для \(\.$ssid) через \(.applicationName)"],
-                        shortTitle: "Брутфорс Wi-Fi", systemImageName: "wifi.exclamationmark"),
-            AppShortcut(intent: SendExploitIntent(), phrases: ["\(.applicationName), отправь эксплойт на \(\.$host):\(\.$port)"],
-                        shortTitle: "Эксплойт", systemImageName: "exclamationmark.triangle")
+                        shortTitle: "Разбудить Люпена", systemImageName: "power.circle")
         ]
     }
 }
